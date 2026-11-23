@@ -57,7 +57,7 @@ status:
 | `ActiveNodeReachable` | controller | 主网关的 TCP 探测结果 | `ProbeSucceeded`、`ProbeFailed` | `3/3 probes to 172.18.0.3:10250 failed: i/o timeout` |
 | `ActiveNodeReady` | controller | 主网关 Node 的 Ready 状态 | 沿用 Node Ready condition 的 reason，例如 `KubeletReady`、`NodeStatusUnknown` | `node1 NotReady since 08:00:01: Kubelet stopped posting node status` |
 | `Switching` | controller | `egress-gw-active` label 还没有打在 `spec.activeNode` 节点上，正在切换 | `WaitingForGateway`、`EgressIPConflict`、`NoAvailableCandidate`、`TargetUnavailable`、`Completed` | `switching node1 -> node2: waiting for egress IPs on node2` |
-| `GatewayReady` | 主网关的 agent | 所有出口 IP 都已经配置到主网关的网卡上 | `EgressIPsConfigured`、`EgressIPConflict`、`InterfaceNotFound` | `192.168.10.100 is answered by aa:bb:cc:dd:ee:ff, not added` |
+| `GatewayReady` | 主网关的 agent | 所有出口 IP 都已经配置到主网关的网卡上 | `EgressIPsConfigured`、`EgressIPConflict`、`InterfaceNotFound`、`ConfigureFailed` | `192.168.10.100 is answered by aa:bb:cc:dd:ee:ff, not added` |
 | `Ready` | controller | 汇总状态，用于 `kubectl wait --for=condition=Ready` 和 ArgoCD 健康检查 | `AsExpected`，或者第一个异常 condition 的 type | `ActiveNodeReachable: 3/3 probes to 172.18.0.3:10250 failed` |
 
 - `Ready=True` 的条件：`ActiveNodeElected`、`ActiveNodeReachable`、`ActiveNodeReady`、`GatewayReady` 都为 True，并且 `Switching=False`。
@@ -151,25 +151,29 @@ controller 向节点的 InternalIP 发起 TCP 连接，目标端口为 `nodeProb
 2. 如果本节点是 `spec.activeNode`，确保出口 IP 存在（见 3.2），**不先删除**。升级前的旧 Pod 留下的出口 IP 会被直接沿用，流量不受影响。
 3. 如果本节点不是 `spec.activeNode`，删除本机所有被管理的出口 IP。
 4. 如果启动时无法访问 API Server，**保持网卡现状不变**，等能访问后再执行上面的步骤。
+5. 如果 `EgressGatewayHA` 不存在，也保持网卡现状不变：没有可以执行的决定，误删 CR 也不影响出口流量。
 
-出口 IP 添加时带地址 label（例如 `eth0:egw`），所以按 label 就能找到本项目管理的 IP，不依赖 API Server。出口 IP 只配置在内核中，不写入节点的网络配置文件，节点重启后会自动消失。
+出口 IP 添加时带地址 label `<网卡名>:egw`（例如 `eth0:egw`），所以按 label 就能找到本项目管理的 IP，不依赖 API Server。Linux 要求地址 label 以网卡名开头、最长 15 字节，网卡名较长时后缀会被截断（例如 `enp175s0f0np0:e`）。出口 IP 只配置在内核中，不写入节点的网络配置文件，节点重启后会自动消失。
 
 ### 3.2 稳态
 
 agent 持续 watch `EgressGatewayHA` 和被管理的 policy，并每 `reconcileInterval`（默认 10s）reconcile 一次。无法访问 API Server 时，保持网卡现状不变。
 
-需要配置的出口 IP 集合 = 所有被管理 policy 的 egressIP 去重后的结果。只有当所有被管理的 policy 都不再使用某个 egressIP 时，才删除这个 IP。
+需要配置的出口 IP 集合 = 所有被管理 policy 的 egressIP 去重后的结果。不在 `spec.egressIPs` 中的 egressIP 会被忽略。只有当所有被管理的 policy 都不再使用某个 egressIP 时，才删除这个 IP。
 
 **本节点是 `spec.activeNode`**：
 
 1. 对每个还不在网卡上的出口 IP，先做**重复地址检测**（发送源地址为 0.0.0.0 的 ARP 探测，相当于 `arping -D`）：
    - 有设备回应：说明其他节点仍然持有这个 IP。不添加，设置 `GatewayReady=False`（reason `EgressIPConflict`，message 写明冲突的 IP 和回应的 MAC 地址），等待下一轮重试。
    - 没有回应：以 /32 添加到 `spec.interface`，然后发送 GARP。
-2. 新增了出口 IP 时，patch 本节点 CiliumNode 的 annotation（例如 `egress-gw-ha/vip-synced=<timestamp>`），触发 Cilium 重新查找 egressIP（见 [Cilium 行为分析](cilium-behavior.md) 第 3 节）。
-3. 更新 status：`status.activeNode.name` 为本节点，`egressIPs` 为已配置的 IP；所有 IP 都已配置时，`ready: true`，`GatewayReady=True`。`spec.interface` 不存在时，`GatewayReady=False`，reason 为 `InterfaceNotFound`。只在状态变化时更新。
+   - 已经在网卡上的出口 IP 不再做重复地址检测，例如升级前留下的 IP。
+2. 新增了出口 IP 时，patch 本节点 CiliumNode 的 annotation（`egressgateway-ha.spidernet.io/egress-ip-synced=<timestamp>`），触发 Cilium 重新查找 egressIP（见 [Cilium 行为分析](cilium-behavior.md) 第 3 节）。
+3. 更新 status：`status.activeNode.name` 为本节点，`egressIPs` 为已配置的 IP；所有 IP 都已配置时，`ready: true`，`GatewayReady=True`。`spec.interface` 不存在时，`GatewayReady=False`，reason 为 `InterfaceNotFound`；添加 IP 等操作失败时，reason 为 `ConfigureFailed`。只在状态变化时更新。
 4. 如果 `garpInterval > 0`，按间隔重发 GARP。
 
-**本节点不是 `spec.activeNode`**：删除所有被管理的出口 IP，不写 status。
+另外删除其他网卡上被管理的出口 IP，例如修改 `spec.interface` 后旧网卡上留下的 IP。
+
+**本节点不是 `spec.activeNode`**：删除所有网卡上被管理的出口 IP，不写 status。
 
 ### 3.3 退出（SIGTERM）
 
@@ -256,7 +260,7 @@ admission webhook 有超时限制（默认 10s），只能做静态校验，不�
 - Helm 用同一个 value 渲染 DaemonSet 的 nodeAffinity，以及 controller 创建 `EgressGatewayHA` 时使用的 `candidateNodeSelector`，所以初次部署时两者一致。CR 创建后，如果运维只修改了 CR 中的 `candidateNodeSelector`，两者会不一致：匹配 selector 但没有 agent Pod 的节点会被视为不可用，不会被选为主网关；有 agent Pod 但不匹配 selector 的节点不会成为候选节点。修改候选节点时，需要同时修改 CR 和 Helm value。
 - capabilities：`NET_ADMIN`（增删 IP）、`NET_RAW`（发送 GARP、重复地址检测）。
 - `updateStrategy` 使用 `maxSurge: 0`，避免同一节点上同时有两个 agent。
-- readinessProbe：agent 连接上 API Server 并完成首次同步后才 Ready。controller 用 agent Pod 的 Ready 状态判断节点能否作为新主网关，不需要单独的心跳。
+- readinessProbe：agent 连接上 API Server 并完成首次同步后才 Ready。健康检查端口使用 host 网络上的 `agent.healthPort`（默认 9790，避开 cilium-agent 占用的 9890）。controller 用 agent Pod 的 Ready 状态判断节点能否作为新主网关，不需要单独的心跳。
 
 ### 5.3 RBAC
 

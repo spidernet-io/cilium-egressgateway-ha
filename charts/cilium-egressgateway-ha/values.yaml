@@ -1,0 +1,32 @@
+image:
+  repository: ghcr.io/spidernet-io/cilium-egressgateway-ha
+  # Defaults to the chart appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# Used by the controller to create EgressGatewayHA "default" when it does not
+# exist. candidateNodeSelector also limits where the agent DaemonSet runs.
+egressGatewayHA:
+  # Required, e.g.
+  #   matchLabels:
+  #     node-role.example.com/egress: "true"
+  candidateNodeSelector: {}
+  interface: eth0
+  # Single IPs and "start-end" ranges.
+  egressIPs: []
+  # Defaults to the first IP of egressIPs.
+  defaultEgressIP: ""
+
+agent:
+  # Interval of the periodic reconcile.
+  reconcileInterval: 10s
+  # Interval of periodic gratuitous ARP; 0s only sends it when an egress IP is added.
+  garpInterval: 0s
+  # Health probe port on the host network.
+  healthPort: 9790
+  logLevel: info
+  priorityClassName: system-node-critical
+  # Gateway nodes are often tainted; tolerate everything by default.
+  tolerations:
+  - operator: Exists
+  resources: {}

@@ -73,6 +73,17 @@ func newTestbed(t *testing.T) *testbed {
 	t.Cleanup(func() { _ = peer.Process.Kill(); _ = peer.Wait() })
 	b := &testbed{peerPID: strconv.Itoa(peer.Process.Pid)}
 
+	// unshare may not have switched namespaces yet right after Start.
+	self, _ := os.Readlink("/proc/self/ns/net")
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+		if ns, err := os.Readlink("/proc/" + b.peerPID + "/ns/net"); err == nil && ns != self {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("peer did not enter a new network namespace")
+		}
+	}
+
 	run(t, "ip", "link", "add", "egw0", "type", "veth", "peer", "name", "egw1")
 	t.Cleanup(func() { _ = exec.Command("ip", "link", "del", "egw0").Run() })
 	run(t, "ip", "link", "set", "egw1", "netns", b.peerPID)
@@ -147,6 +158,10 @@ func TestAddListDel(t *testing.T) {
 	}
 	if got, _ := m.List("egw0"); !slices.Equal(got, []netip.Addr{ip2}) {
 		t.Fatalf("List() after Del = %v, want [%s]", got, ip2)
+	}
+	all, err := m.ListAll()
+	if err != nil || len(all) != 1 || !slices.Equal(all["egw0"], []netip.Addr{ip2}) {
+		t.Fatalf("ListAll() = %v, %v, want map[egw0:[%s]]", all, err, ip2)
 	}
 	if out := run(t, "ip", "-4", "-o", "addr", "show", "dev", "egw0"); !strings.Contains(out, "10.99.0.12/32") {
 		t.Errorf("unmanaged address was removed:\n%s", out)

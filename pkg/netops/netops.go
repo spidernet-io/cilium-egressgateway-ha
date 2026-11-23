@@ -93,9 +93,36 @@ func (m *Manager) List(iface string) ([]netip.Addr, error) {
 	if err != nil {
 		return nil, err
 	}
+	return listManaged(l, label)
+}
+
+// ListAll returns the managed IPv4 addresses on all interfaces, keyed by interface name.
+func (m *Manager) ListAll() (map[string][]netip.Addr, error) {
+	links, err := netlink.LinkList()
+	if err != nil {
+		return nil, fmt.Errorf("list interfaces: %w", err)
+	}
+	out := map[string][]netip.Addr{}
+	for _, l := range links {
+		label, err := Label(l.Attrs().Name)
+		if err != nil {
+			continue
+		}
+		ips, err := listManaged(l, label)
+		if err != nil {
+			return nil, err
+		}
+		if len(ips) > 0 {
+			out[l.Attrs().Name] = ips
+		}
+	}
+	return out, nil
+}
+
+func listManaged(l netlink.Link, label string) ([]netip.Addr, error) {
 	addrs, err := netlink.AddrList(l, netlink.FAMILY_V4)
 	if err != nil {
-		return nil, fmt.Errorf("list addresses on %s: %w", iface, err)
+		return nil, fmt.Errorf("list addresses on %s: %w", l.Attrs().Name, err)
 	}
 	var out []netip.Addr
 	for _, a := range addrs {

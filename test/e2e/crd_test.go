@@ -11,30 +11,15 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/config"
 
 	"github.com/spidernet-io/cilium-egressgateway-ha/api/v1alpha1"
-	"github.com/spidernet-io/cilium-egressgateway-ha/pkg/k8s"
 )
-
-func newClient(t *testing.T) client.Client {
-	t.Helper()
-	cfg, err := config.GetConfig()
-	if err != nil {
-		t.Fatalf("load kubeconfig: %v", err)
-	}
-	c, err := client.New(cfg, client.Options{Scheme: k8s.NewScheme()})
-	if err != nil {
-		t.Fatalf("new client: %v", err)
-	}
-	return c
-}
 
 func sampleEGWHA(name string) *v1alpha1.EgressGatewayHA {
 	return &v1alpha1.EgressGatewayHA{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
 		Spec: v1alpha1.EgressGatewayHASpec{
-			CandidateNodeSelector: metav1.LabelSelector{MatchLabels: map[string]string{"e2e": "true"}},
+			CandidateNodeSelector: metav1.LabelSelector{MatchLabels: map[string]string{"egress-gw-candidate": "true"}},
 			Interface:             "eth0",
 			EgressIPs:             []string{"172.18.0.200-172.18.0.210"},
 		},

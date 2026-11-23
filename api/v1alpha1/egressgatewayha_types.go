@@ -41,6 +41,7 @@ const (
 
 	ReasonEgressIPsConfigured = "EgressIPsConfigured"
 	ReasonInterfaceNotFound   = "InterfaceNotFound"
+	ReasonConfigureFailed     = "ConfigureFailed"
 
 	ReasonAsExpected = "AsExpected"
 )
