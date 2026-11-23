@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "egwha.fullname" . }}-controller
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "egwha.labels" . | nindent 4 }}
+data:
+  # Used only to create EgressGatewayHA "default" when it does not exist.
+  default-spec.yaml: |
+    candidateNodeSelector:
+      {{- toYaml .Values.egressGatewayHA.candidateNodeSelector | nindent 6 }}
+    interface: {{ .Values.egressGatewayHA.interface | quote }}
+    egressIPs:
+      {{- required "egressGatewayHA.egressIPs is required" .Values.egressGatewayHA.egressIPs | toYaml | nindent 6 }}
+    {{- with .Values.egressGatewayHA.defaultEgressIP }}
+    defaultEgressIP: {{ . | quote }}
+    {{- end }}

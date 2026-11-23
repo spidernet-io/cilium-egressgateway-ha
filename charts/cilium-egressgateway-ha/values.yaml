@@ -30,3 +30,25 @@ agent:
   tolerations:
   - operator: Exists
   resources: {}
+
+controller:
+  replicas: 2
+  # Interval of the periodic reconcile.
+  resyncInterval: 10s
+  # Where cilium-agent pods run; their readiness filters new active nodes.
+  ciliumNamespace: kube-system
+  ciliumAgentSelector: k8s-app=cilium
+  healthPort: 8081
+  metricsPort: 8080
+  logLevel: info
+  priorityClassName: system-cluster-critical
+  nodeSelector:
+    node-role.kubernetes.io/control-plane: ""
+  tolerations:
+  - key: node-role.kubernetes.io/control-plane
+    operator: Exists
+    effect: NoSchedule
+  - key: node-role.kubernetes.io/master
+    operator: Exists
+    effect: NoSchedule
+  resources: {}

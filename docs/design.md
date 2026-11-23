@@ -148,7 +148,7 @@ controller 看到 `status.activeNode.name` 等于 `spec.activeNode`，并且 `re
 2. 删除其他所有节点 Node 和 CiliumNode 上的这个 label。旧节点宕机时，它的 cilium-agent 不会把 Node label 的变化同步到 CiliumNode，所以要直接修改 CiliumNode。
 3. 设置 `Switching=False`，切换完成。
 
-controller 在切换中途重启时，新实例比较 `spec.activeNode`、label 所在的节点和 `status.activeNode`，从中断的位置继续。例如第二阶段中途重启，两个节点都带有 label 时，继续删除旧节点上的 label。
+controller 在切换中途重启时，新实例比较 `spec.activeNode`、label 所在的节点、`status.activeNode`，以及记录切换来源的 annotation，从中断的位置继续。例如第二阶段中途重启，两个节点都带有 label 时，继续删除旧节点上的 label。
 
 ### 4.3 双主防护
 
@@ -203,7 +203,7 @@ kubectl patch egressgatewayha default --type merge -p '{"spec":{"activeNode":"no
 
 - **启动**：本节点是主网关时，确保出口 IP 存在，**不先删除**，直接沿用升级前留下的出口 IP；不是主网关时，删除本机的出口 IP。无法访问 API Server 时，保持网卡现状不变。
 - **运行中**：watch `EgressGatewayHA` 和 policy，并每 10s reconcile 一次。出口 IP 被其他组件删除时，会重新添加。
-- **退出（SIGTERM）**：不删除出口 IP，也不修改 label，所以 agent 升级不影响出口流量。例外：本节点已经不是候选节点，也不是主网关时，删除出口 IP。
+- **退出（SIGTERM）**：不删除出口 IP，也不修改 label，所以 agent 升级不影响出口流量。例外：本节点已经不是候选节点时，删除出口 IP（即使它仍是主网关，controller 也会把它切走）。
 
 agent 的详细流程见[设计细节](reference/design-details.md)第 3 章。
 

@@ -39,6 +39,7 @@ status:
 - CRD schema 中用 CEL 规则（`self.metadata.name == 'default'`）限制只能创建一个实例。
 - `kubectl get egressgatewayha` 通过 printer columns 显示 `ACTIVE`（`spec.activeNode`）、`REACHABLE`、`READY`、`AGE`。
 - status 中不单独记录"已经完成切换的节点"。切换是否完成，以 `egress-gw-active` label 实际所在的节点为准，避免维护一份需要和 label 保持一致的状态。
+- 进行中的切换记录在 annotation `egressgateway-ha.spidernet.io/switch` 中（JSON：`from`、`to`、`reason`、`message`），和 `spec.activeNode` 在同一次 patch 中写入，切换完成后删除。controller 重启后据此继续切换，并在完成时写出 `ActiveNodeElected` 的 reason。`spec.activeNode` 变化了、但 annotation 中的 `to` 不等于它时，说明是运维修改的，按手动切换处理。
 
 ### 1.2 spec 的创建方式
 
@@ -55,12 +56,13 @@ status:
 |---|---|---|---|---|
 | `ActiveNodeElected` | controller | 已经选出主网关，并且 label 已经在这个节点上 | `Initial`（初次部署）、`Failover`（故障切换）、`Manual`（运维修改）、`CandidateRemoved`（原主网关不再是候选节点） | `node2 became active node, failover from node1: probe failed` |
 | `ActiveNodeReachable` | controller | 主网关的 TCP 探测结果 | `ProbeSucceeded`、`ProbeFailed` | `3/3 probes to 172.18.0.3:10250 failed: i/o timeout` |
-| `ActiveNodeReady` | controller | 主网关 Node 的 Ready 状态 | 沿用 Node Ready condition 的 reason，例如 `KubeletReady`、`NodeStatusUnknown` | `node1 NotReady since 08:00:01: Kubelet stopped posting node status` |
+| `ActiveNodeReady` | controller | 主网关 Node 的 Ready 状态 | 沿用 Node Ready condition 的 reason，例如 `KubeletReady`、`NodeStatusUnknown`；Node 不存在时为 `NodeNotFound`；还没有主网关时为 `NoActiveNode`（status 为 Unknown） | `node1 NotReady since 08:00:01: Kubelet stopped posting node status` |
 | `Switching` | controller | `egress-gw-active` label 还没有打在 `spec.activeNode` 节点上，正在切换 | `WaitingForGateway`、`EgressIPConflict`、`NoAvailableCandidate`、`TargetUnavailable`、`Completed` | `switching node1 -> node2: waiting for egress IPs on node2` |
 | `GatewayReady` | 主网关的 agent | 所有出口 IP 都已经配置到主网关的网卡上 | `EgressIPsConfigured`、`EgressIPConflict`、`InterfaceNotFound`、`ConfigureFailed` | `192.168.10.100 is answered by aa:bb:cc:dd:ee:ff, not added` |
 | `Ready` | controller | 汇总状态，用于 `kubectl wait --for=condition=Ready` 和 ArgoCD 健康检查 | `AsExpected`，或者第一个异常 condition 的 type | `ActiveNodeReachable: 3/3 probes to 172.18.0.3:10250 failed` |
 
-- `Ready=True` 的条件：`ActiveNodeElected`、`ActiveNodeReachable`、`ActiveNodeReady`、`GatewayReady` 都为 True，并且 `Switching=False`。
+- `Ready=True` 的条件：`ActiveNodeElected`、`ActiveNodeReachable`、`ActiveNodeReady`、`GatewayReady` 都为 True，并且 `Switching=False`。不满足时，reason 取第一个异常的 condition，检查顺序为 `ActiveNodeElected`、`Switching`、`ActiveNodeReachable`、`ActiveNodeReady`、`GatewayReady`。切换期间 reason 是 `Switching`，可以直接看到切换停在哪一步。
+- `GatewayReady` 只在 `status.activeNode.name` 等于 `spec.activeNode` 时有效，否则汇总时视为还没有上报。
 - `ActiveNodeReachable` 只在连续失败达到 `failureThreshold` 时才变为 False。尚未达到阈值时保持 True，在 message 中写明失败次数，例如 `1/3 probes failed`。
 - `Switching` 的 reason：
   - `WaitingForGateway`：已经写入 `spec.activeNode`，等待新节点配好出口 IP。
@@ -76,6 +78,7 @@ status:
 - 两方都用 Server-Side Apply 更新 status，使用不同的 field manager，各自只管理自己的字段。conditions 声明为 `listType=map`、`listMapKey=type`，所以按 condition 类型分属不同的 field manager，不会互相覆盖。切换主网关时，新主网关的 agent 用 force apply 接管 `status.activeNode` 和 `GatewayReady`。
 - 切换过程中，新节点的 agent 写入之前，`status.activeNode` 仍然是旧主网关留下的内容。所以 controller 只有在 `status.activeNode.name` 等于 `spec.activeNode` 时，才认为它有效。
 - `candidates` 只记录 TCP 探测结果。选择新主网关时用到的 Node Ready、cilium-agent 和 agent Pod 的就绪状态，controller 直接从 Node 和 Pod 对象读取，不写进 status。
+- controller 每次 reconcile 都直接从 API Server 读取 `EgressGatewayHA`，以及带 `egress-gw-active` label 的 Node 和 CiliumNode（按 label selector 过滤，对象很少），不使用 informer 缓存。刚写完 status 或 label 后，缓存可能还是旧的；用旧数据计算 conditions 并写回，会覆盖刚写入的结果，或者把 controller 自己移动的 label 误判为手动切换。其他信息（Node Ready、候选 label、Pod 就绪状态）仍然从缓存读取，短暂过期只会推迟判断。
 
 ## 2. 节点故障探测
 
@@ -178,7 +181,7 @@ agent 持续 watch `EgressGatewayHA` 和被管理的 policy，并每 `reconcileI
 ### 3.3 退出（SIGTERM）
 
 - **不删除出口 IP**，也不修改任何 label。Pod 升级、驱逐期间，出口 IP 和 Cilium 的 BPF 配置保持不变，出口流量不受影响。新 Pod 启动后按 3.1 沿用已有 IP。
-- 例外：如果本节点已经不匹配 `candidateNodeSelector`（节点退出候选），并且也不是 `spec.activeNode`，就删除出口 IP。DaemonSet 在节点不再匹配时会删除 agent Pod，所以这种情况会走到这里。
+- 例外：如果本节点已经不匹配 `candidateNodeSelector`（节点退出候选），就删除出口 IP。DaemonSet 在节点不再匹配时会删除 agent Pod，所以这种情况会走到这里。即使本节点仍然是 `spec.activeNode` 也删除：controller 会因为 `CandidateRemoved` 把主网关切走，而这个节点上已经没有 agent，留下的出口 IP 会让新主网关的重复地址检测一直失败。
 
 ## 4. Webhook
 

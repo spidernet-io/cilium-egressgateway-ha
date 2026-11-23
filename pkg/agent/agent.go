@@ -340,16 +340,16 @@ func (r *Reconciler) patchCiliumNode(ctx context.Context, now time.Time) error {
 	return nil
 }
 
-// CleanupOnExit removes the egress IPs on shutdown only when the node is
-// neither the active node nor a candidate anymore. Otherwise, and on any read
-// error, the egress IPs are kept so that agent restarts do not affect traffic.
+// CleanupOnExit removes the egress IPs on shutdown only when the node is no
+// longer a candidate, which is when the DaemonSet removes the agent. This also
+// applies to the active node: the controller switches away from it anyway, and
+// no agent would be left to remove the IP, which would block the new active
+// node with a DAD conflict. Otherwise, and on any read error, the egress IPs
+// are kept so that agent restarts do not affect traffic.
 func (r *Reconciler) CleanupOnExit(ctx context.Context, reader client.Reader) error {
 	egw := &v1alpha1.EgressGatewayHA{}
 	if err := reader.Get(ctx, client.ObjectKey{Name: v1alpha1.SingletonName}, egw); err != nil {
 		return client.IgnoreNotFound(err)
-	}
-	if egw.Spec.ActiveNode == r.Config.NodeName {
-		return nil
 	}
 	node := &corev1.Node{}
 	if err := reader.Get(ctx, client.ObjectKey{Name: r.Config.NodeName}, node); err != nil && !apierrors.IsNotFound(err) {

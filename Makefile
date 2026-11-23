@@ -51,8 +51,9 @@ kind-deploy: image
 	$(KIND) load docker-image --name $(KIND_CLUSTER) $(IMAGE):$(TAG)
 	$(HELM) upgrade --install egwha $(CHART) -n $(NAMESPACE) -f $(E2E_VALUES) \
 		--set image.repository=$(IMAGE) --set image.tag=$(TAG) --set image.pullPolicy=Never
-	$(KUBECTL) -n $(NAMESPACE) rollout restart ds/egwha-agent
+	$(KUBECTL) -n $(NAMESPACE) rollout restart ds/egwha-agent deploy/egwha-controller
 	$(KUBECTL) -n $(NAMESPACE) rollout status ds/egwha-agent --timeout=120s
+	$(KUBECTL) -n $(NAMESPACE) rollout status deploy/egwha-controller --timeout=120s
 
 # Runs against the kind cluster in $KUBECONFIG, e.g. KUBECONFIG=$(kind get kubeconfig --name egw-ha).
 .PHONY: e2e

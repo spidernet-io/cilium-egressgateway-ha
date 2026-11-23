@@ -369,6 +369,8 @@ func TestPeriodicGARP(t *testing.T) {
 func TestCleanupOnExit(t *testing.T) {
 	notCandidate := egwha("node2")
 	notCandidate.Spec.CandidateNodeSelector.MatchLabels = map[string]string{"candidate": "no"}
+	activeNotCandidate := egwha(node)
+	activeNotCandidate.Spec.CandidateNodeSelector.MatchLabels = map[string]string{"candidate": "no"}
 	for name, tc := range map[string]struct {
 		egw     *v1alpha1.EgressGatewayHA
 		funcs   *interceptor.Funcs

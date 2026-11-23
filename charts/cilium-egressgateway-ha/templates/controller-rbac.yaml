@@ -1,0 +1,85 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "egwha.fullname" . }}-controller
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "egwha.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "egwha.fullname" . }}-controller
+  labels:
+    {{- include "egwha.labels" . | nindent 4 }}
+rules:
+- apiGroups: ["egressgateway-ha.spidernet.io"]
+  resources: ["egressgatewayhas"]
+  verbs: ["get", "list", "watch", "create", "update", "patch"]
+- apiGroups: ["egressgateway-ha.spidernet.io"]
+  resources: ["egressgatewayhas/status"]
+  verbs: ["patch"]
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["get", "list", "watch", "patch"]
+- apiGroups: ["cilium.io"]
+  resources: ["ciliumnodes"]
+  verbs: ["get", "list", "watch", "patch"]
+- apiGroups: ["cilium.io"]
+  resources: ["ciliumegressgatewaypolicies"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["events.k8s.io"]
+  resources: ["events"]
+  verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "egwha.fullname" . }}-controller
+  labels:
+    {{- include "egwha.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "egwha.fullname" . }}-controller
+subjects:
+- kind: ServiceAccount
+  name: {{ include "egwha.fullname" . }}-controller
+  namespace: {{ .Release.Namespace }}
+{{- $pods := list .Values.controller.ciliumNamespace .Release.Namespace | uniq }}
+{{- range $ns := $pods }}
+---
+# Read cilium-agent and agent pods to filter new active nodes.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "egwha.fullname" $ }}-controller-pods
+  namespace: {{ $ns }}
+  labels:
+    {{- include "egwha.labels" $ | nindent 4 }}
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch"]
+{{- if eq $ns $.Release.Namespace }}
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["get", "create", "update"]
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "egwha.fullname" $ }}-controller-pods
+  namespace: {{ $ns }}
+  labels:
+    {{- include "egwha.labels" $ | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "egwha.fullname" $ }}-controller-pods
+subjects:
+- kind: ServiceAccount
+  name: {{ include "egwha.fullname" $ }}-controller
+  namespace: {{ $.Release.Namespace }}
+{{- end }}

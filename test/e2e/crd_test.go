@@ -8,7 +8,6 @@ import (
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -26,58 +25,19 @@ func sampleEGWHA(name string) *v1alpha1.EgressGatewayHA {
 	}
 }
 
+// The controller creates and owns EgressGatewayHA "default"; only the schema is checked here.
 func TestCRD(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	c := newClient(t)
 
-	existing := &v1alpha1.EgressGatewayHA{}
-	err := c.Get(ctx, client.ObjectKey{Name: v1alpha1.SingletonName}, existing)
-	if err == nil {
-		t.Skip("EgressGatewayHA default already exists; refusing to modify it")
+	if err := c.Create(ctx, sampleEGWHA("other")); !apierrors.IsInvalid(err) {
+		t.Errorf("non-default name: want Invalid error, got %v", err)
 	}
-	if !apierrors.IsNotFound(err) {
-		t.Fatalf("get default: %v", err)
+	obj := sampleEGWHA(v1alpha1.SingletonName)
+	obj.Spec.EgressIPs = nil
+	obj.Spec.Interface = ""
+	if err := c.Create(ctx, obj, client.DryRunAll); !apierrors.IsInvalid(err) {
+		t.Errorf("missing required fields: want Invalid error, got %v", err)
 	}
-
-	t.Run("reject non-default name", func(t *testing.T) {
-		err := c.Create(ctx, sampleEGWHA("other"))
-		if !apierrors.IsInvalid(err) {
-			t.Fatalf("want Invalid error, got %v", err)
-		}
-	})
-
-	t.Run("reject missing required fields", func(t *testing.T) {
-		obj := sampleEGWHA(v1alpha1.SingletonName)
-		obj.Spec.EgressIPs = nil
-		obj.Spec.Interface = ""
-		if err := c.Create(ctx, obj); !apierrors.IsInvalid(err) {
-			t.Fatalf("want Invalid error, got %v", err)
-		}
-	})
-
-	t.Run("create default and update status", func(t *testing.T) {
-		obj := sampleEGWHA(v1alpha1.SingletonName)
-		if err := c.Create(ctx, obj); err != nil {
-			t.Fatalf("create default: %v", err)
-		}
-		t.Cleanup(func() { _ = c.Delete(context.Background(), obj) })
-
-		obj.Status.ActiveNode = &v1alpha1.ActiveNodeStatus{Name: "n1", EgressIPs: []string{"172.18.0.200"}, Ready: true}
-		meta.SetStatusCondition(&obj.Status.Conditions, metav1.Condition{
-			Type: v1alpha1.ConditionReady, Status: metav1.ConditionTrue, Reason: v1alpha1.ReasonAsExpected,
-		})
-		if err := c.Status().Update(ctx, obj); err != nil {
-			t.Fatalf("update status: %v", err)
-		}
-
-		got := &v1alpha1.EgressGatewayHA{}
-		if err := c.Get(ctx, client.ObjectKeyFromObject(obj), got); err != nil {
-			t.Fatal(err)
-		}
-		if got.Status.ActiveNode == nil || !got.Status.ActiveNode.Ready ||
-			!meta.IsStatusConditionTrue(got.Status.Conditions, v1alpha1.ConditionReady) {
-			t.Fatalf("unexpected status: %+v", got.Status)
-		}
-	})
 }

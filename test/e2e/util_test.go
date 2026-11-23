@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	ciliumv2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -108,35 +107,6 @@ func eventually(t *testing.T, timeout time.Duration, what string, cond func() er
 	}
 }
 
-func patchLabel(ctx context.Context, c client.Client, obj client.Object, value *string) error {
-	v := "null"
-	if value != nil {
-		v = fmt.Sprintf("%q", *value)
-	}
-	patch := fmt.Sprintf(`{"metadata":{"labels":{%q:%s}}}`, v1alpha1.ActiveLabelKey, v)
-	return c.Patch(ctx, obj, client.RawPatch(types.MergePatchType, []byte(patch)))
-}
-
-// setActiveLabel moves the active label to node on Node and CiliumNode, the
-// same way the controller does in the second phase. An empty node removes it.
-func setActiveLabel(t *testing.T, c client.Client, node string) {
-	t.Helper()
-	ctx := context.Background()
-	val := v1alpha1.ActiveLabelValue
-	for _, n := range allNodes {
-		var v *string
-		if n == node {
-			v = &val
-		}
-		for _, obj := range []client.Object{&corev1.Node{}, &ciliumv2.CiliumNode{}} {
-			obj.SetName(n)
-			if err := patchLabel(ctx, c, obj, v); err != nil {
-				t.Fatalf("label %T %s: %v", obj, n, err)
-			}
-		}
-	}
-}
-
 func getEGWHA(ctx context.Context, c client.Client) (*v1alpha1.EgressGatewayHA, error) {
 	egw := &v1alpha1.EgressGatewayHA{}
 	return egw, c.Get(ctx, client.ObjectKey{Name: v1alpha1.SingletonName}, egw)
@@ -150,4 +120,42 @@ func setActiveNode(t *testing.T, c client.Client, node string) {
 	if err := c.Patch(context.Background(), egw, client.RawPatch(types.MergePatchType, []byte(patch))); err != nil {
 		t.Fatalf("set activeNode=%q: %v", node, err)
 	}
+}
+
+func waitSourceIP(t *testing.T, want string) {
+	t.Helper()
+	eventually(t, time.Minute, "client source IP "+want, func() error {
+		ip, err := clientSourceIP()
+		if err != nil {
+			return err
+		}
+		if ip != want {
+			return fmt.Errorf("source IP %s", ip)
+		}
+		return nil
+	})
+}
+
+func agentPod(t *testing.T, c client.Client, node string) *corev1.Pod {
+	t.Helper()
+	pods := &corev1.PodList{}
+	if err := c.List(context.Background(), pods, client.InNamespace(namespace),
+		client.MatchingLabels{"app.kubernetes.io/component": "agent"}); err != nil {
+		t.Fatal(err)
+	}
+	for i := range pods.Items {
+		if p := &pods.Items[i]; p.Spec.NodeName == node && p.DeletionTimestamp == nil {
+			return p
+		}
+	}
+	return &corev1.Pod{}
+}
+
+func podReady(p *corev1.Pod) bool {
+	for _, c := range p.Status.Conditions {
+		if c.Type == corev1.PodReady {
+			return c.Status == corev1.ConditionTrue
+		}
+	}
+	return false
 }
