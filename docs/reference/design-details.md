@@ -241,7 +241,8 @@ controller 的两个副本都提供 webhook 服务，不依赖工作实例。
 
 - 名字必须是 `default`（CRD schema 中的 CEL 规则，不依赖 webhook）。
 - `egressIPs` 中每一项都是合法的 IPv4 地址或地址范围（`起始IP-结束IP`）。`defaultEgressIP` 如果填写，必须在 `egressIPs` 中。
-- `spec.activeNode` 非空时，节点必须存在，并且匹配 `candidateNodeSelector`。
+- `spec.activeNode` 非空并且被修改时，节点必须存在，并且匹配 `candidateNodeSelector`。只在修改时检查，这样主网关的 Node 被删除后，运维仍然可以修改其他字段。
+- **controller 自己的修改不经过这个 webhook**：webhook 配置中用 `matchConditions` 排除 controller 的 ServiceAccount（`request.userInfo.username != 'system:serviceaccount:<namespace>:<controller SA>'`），API Server 不会调用 webhook。原因有两个：一是故障切换时 controller 要写 `spec.activeNode`，不能依赖 webhook 是否可用；二是 controller 回滚手动切换时，原来的节点可能已经不是候选节点，不能被拒绝。controller 写入的节点由它自己的选择规则保证。
 - 修改 `egressIPs` 时，如果已有被管理的 policy 使用的 egressIP 不在新的列表中，拒绝修改。
 
 ### 4.5 运行时校验
@@ -256,6 +257,11 @@ admission webhook 有超时限制（默认 10s），只能做静态校验，不�
 - `failurePolicy: Fail`。如果使用 `Ignore`，controller 不可用时，未填写 egressIP 的 policy 会直接进入集群，Cilium 会改用默认路由网卡的 IP，出口 IP 会悄悄出错。由于 `matchConditions` 只匹配被管理的 policy，其他 policy 不会被发送到 webhook，所以 `Fail` 不会影响它们。
 - `sideEffects: None`。出口 IP 允许复用，webhook 不需要维护分配记录，没有副作用。
 - TLS 证书：controller 启动时自签证书，保存到 Secret 中供两个副本共用，并 patch webhook 配置的 `caBundle`。不依赖 cert-manager。
+  - CA 和服务端证书都使用 ECDSA P-256，有效期 10 年。启动时，如果 Secret 中的证书无效、不覆盖 Service 的 DNS 名称、或者 90 天内过期，就重新生成。两个副本同时启动时，以先写入 Secret 的为准。
+  - 证书在进程运行期间不会变化，所以直接从内存提供给 webhook server，不写文件，也不用 certwatcher 监视文件。certwatcher 依赖 inotify，节点上 `fs.inotify.max_user_instances` 用完时（kind 等多个节点共用宿主机内核的环境中很常见），controller 会启动失败。
+  - 不在运行期间轮换证书。需要更换时，删除 Secret 后重启 controller。
+  - Helm chart 中的 webhook 配置不写 `caBundle`，所以 `helm upgrade` 不会清掉 controller 写入的值。
+- controller 的两个副本在 webhook server 启动后才 Ready，所以 webhook Service 只会把请求转发到已经能处理请求的副本。
 
 ## 5. 部署
 

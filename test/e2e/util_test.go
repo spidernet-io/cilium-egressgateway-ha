@@ -112,12 +112,19 @@ func getEGWHA(ctx context.Context, c client.Client) (*v1alpha1.EgressGatewayHA, 
 	return egw, c.Get(ctx, client.ObjectKey{Name: v1alpha1.SingletonName}, egw)
 }
 
-func setActiveNode(t *testing.T, c client.Client, node string) {
-	t.Helper()
-	patch := fmt.Sprintf(`{"spec":{"activeNode":%q}}`, node)
+func patchActiveNode(c client.Client, node string) error {
+	return patchEGWHA(c, fmt.Sprintf(`{"spec":{"activeNode":%q}}`, node))
+}
+
+func patchEGWHA(c client.Client, patch string) error {
 	egw := &v1alpha1.EgressGatewayHA{}
 	egw.Name = v1alpha1.SingletonName
-	if err := c.Patch(context.Background(), egw, client.RawPatch(types.MergePatchType, []byte(patch))); err != nil {
+	return c.Patch(context.Background(), egw, client.RawPatch(types.MergePatchType, []byte(patch)))
+}
+
+func setActiveNode(t *testing.T, c client.Client, node string) {
+	t.Helper()
+	if err := patchActiveNode(c, node); err != nil {
 		t.Fatalf("set activeNode=%q: %v", node, err)
 	}
 }

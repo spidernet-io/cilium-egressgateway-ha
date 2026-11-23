@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"crypto/tls"
 	"flag"
 	"os"
 	"time"
@@ -14,11 +16,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+	"sigs.k8s.io/controller-runtime/pkg/webhook"
+	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	"github.com/spidernet-io/cilium-egressgateway-ha/api/v1alpha1"
 	"github.com/spidernet-io/cilium-egressgateway-ha/pkg/controller"
 	"github.com/spidernet-io/cilium-egressgateway-ha/pkg/k8s"
 	"github.com/spidernet-io/cilium-egressgateway-ha/pkg/probe"
+	egwwebhook "github.com/spidernet-io/cilium-egressgateway-ha/pkg/webhook"
 )
 
 func main() {
@@ -29,6 +34,10 @@ func main() {
 		probeAddr, metricsAddr         string
 		leaderElect                    bool
 		leaderElectionNS, leaderElecID string
+	)
+	var (
+		webhookPort int
+		certCfg     egwwebhook.CertConfig
 	)
 	probeCfg := probe.DefaultConfig()
 	podNS := os.Getenv("POD_NAMESPACE")
@@ -47,6 +56,11 @@ func main() {
 	flag.BoolVar(&leaderElect, "leader-elect", true, "elect one working replica with a Lease")
 	flag.StringVar(&leaderElectionNS, "leader-election-namespace", podNS, "namespace of the leader election Lease")
 	flag.StringVar(&leaderElecID, "leader-election-id", "egressgateway-ha-controller", "name of the leader election Lease")
+	flag.IntVar(&webhookPort, "webhook-port", 9443, "port of the admission webhook server")
+	flag.StringVar(&certCfg.ServiceName, "webhook-service", "", "Service of the admission webhooks; webhooks are disabled when empty")
+	flag.StringVar(&certCfg.SecretName, "webhook-secret", "egressgateway-ha-webhook-cert", "Secret that stores the self-signed webhook certificate")
+	flag.StringVar(&certCfg.MutatingWebhookConfiguration, "mutating-webhook-configuration", "", "MutatingWebhookConfiguration whose caBundle is set")
+	flag.StringVar(&certCfg.ValidatingWebhookConfiguration, "validating-webhook-configuration", "", "ValidatingWebhookConfiguration whose caBundle is set")
 	opts := zap.Options{}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
@@ -76,6 +90,25 @@ func main() {
 		}
 	}
 
+	restCfg := ctrl.GetConfigOrDie()
+	scheme := k8s.NewScheme()
+	certCfg.Namespace = podNS
+	var cert *tls.Certificate
+	if certCfg.ServiceName != "" {
+		// Both replicas serve the webhooks, so the certificate is set up before
+		// and independently of leader election.
+		direct, err := client.New(restCfg, client.Options{Scheme: scheme})
+		if err != nil {
+			fail(err, "unable to create client")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		cert, err = egwwebhook.EnsureCert(ctx, direct, certCfg)
+		cancel()
+		if err != nil {
+			fail(err, "unable to set up the webhook certificate")
+		}
+	}
+
 	// Only cache the cilium-agent and agent pods.
 	podNamespaces := map[string]cache.Config{cfg.CiliumNamespace: {LabelSelector: cfg.CiliumSelector}}
 	if cfg.AgentNamespace == cfg.CiliumNamespace {
@@ -83,8 +116,13 @@ func main() {
 	} else {
 		podNamespaces[cfg.AgentNamespace] = cache.Config{LabelSelector: cfg.AgentSelector}
 	}
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:                  k8s.NewScheme(),
+	mgr, err := ctrl.NewManager(restCfg, ctrl.Options{
+		Scheme: scheme,
+		WebhookServer: webhook.NewServer(webhook.Options{Port: webhookPort, TLSOpts: []func(*tls.Config){
+			func(c *tls.Config) {
+				c.GetCertificate = func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return cert, nil }
+			},
+		}}),
 		Metrics:                 metricsserver.Options{BindAddress: metricsAddr},
 		HealthProbeBindAddress:  probeAddr,
 		LeaderElection:          leaderElect,
@@ -118,7 +156,16 @@ func main() {
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		fail(err, "unable to add health check")
 	}
-	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
+	readyCheck := healthz.Ping
+	if certCfg.ServiceName != "" {
+		h := &egwwebhook.Handlers{Client: mgr.GetClient(), Decoder: admission.NewDecoder(mgr.GetScheme())}
+		srv := mgr.GetWebhookServer()
+		srv.Register(egwwebhook.MutatePolicyPath, &webhook.Admission{Handler: admission.HandlerFunc(h.MutatePolicy)})
+		srv.Register(egwwebhook.ValidatePolicyPath, &webhook.Admission{Handler: admission.HandlerFunc(h.ValidatePolicy)})
+		srv.Register(egwwebhook.ValidateEGWHAPath, &webhook.Admission{Handler: admission.HandlerFunc(h.ValidateEGWHA)})
+		readyCheck = srv.StartedChecker()
+	}
+	if err := mgr.AddReadyzCheck("readyz", readyCheck); err != nil {
 		fail(err, "unable to add ready check")
 	}
 

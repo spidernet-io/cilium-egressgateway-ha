@@ -60,12 +60,19 @@ spec:
         - --health-probe-bind-address=:{{ .Values.controller.healthPort }}
         - --metrics-bind-address=:{{ .Values.controller.metricsPort }}
         - --zap-log-level={{ .Values.controller.logLevel }}
+        - --webhook-port={{ .Values.webhook.port }}
+        - --webhook-service={{ include "egwha.fullname" . }}-webhook
+        - --webhook-secret={{ include "egwha.fullname" . }}-webhook-cert
+        - --mutating-webhook-configuration={{ include "egwha.fullname" . }}-webhook
+        - --validating-webhook-configuration={{ include "egwha.fullname" . }}-webhook
         env:
         - name: POD_NAMESPACE
           valueFrom:
             fieldRef:
               fieldPath: metadata.namespace
         ports:
+        - name: webhook
+          containerPort: {{ .Values.webhook.port }}
         - name: metrics
           containerPort: {{ .Values.controller.metricsPort }}
         - name: health

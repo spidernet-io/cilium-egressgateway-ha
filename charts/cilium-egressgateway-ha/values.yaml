@@ -62,3 +62,8 @@ controller:
     operator: Exists
     effect: NoSchedule
   resources: {}
+
+webhook:
+  # Port of the webhook server in the controller pods.
+  port: 9443
+  timeoutSeconds: 10

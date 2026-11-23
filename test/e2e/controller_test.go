@@ -244,10 +244,11 @@ func TestController(t *testing.T) {
 		waitSourceIP(t, egressIP)
 	})
 
-	t.Run("manual switch to a non-candidate is rolled back", func(t *testing.T) {
-		setActiveNode(t, c, worker3)
-		waitSwitching(t, c, metav1.ConditionFalse, v1alpha1.ReasonTargetUnavailable,
-			worker3+" is not available (does not match candidateNodeSelector), spec.activeNode restored to "+active)
+	t.Run("manual switch to a non-candidate is rejected by the webhook", func(t *testing.T) {
+		err := patchActiveNode(c, worker3)
+		if err == nil || !strings.Contains(err.Error(), "node "+worker3+" does not match spec.candidateNodeSelector") {
+			t.Fatalf("want webhook denial, got %v", err)
+		}
 		waitSteady(t, c, active)
 	})
 

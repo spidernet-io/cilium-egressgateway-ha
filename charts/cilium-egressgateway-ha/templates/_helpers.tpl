@@ -29,3 +29,8 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{ toYaml . }}
 {{- end }}
 {{- end -}}
+
+{{/* CEL: the policy references the active label in its nodeSelector. */}}
+{{- define "egwha.managedPolicyExpression" -}}
+has(object.spec.egressGateway) && has(object.spec.egressGateway.nodeSelector) && ((has(object.spec.egressGateway.nodeSelector.matchLabels) && 'egress-gw-active' in object.spec.egressGateway.nodeSelector.matchLabels) || (has(object.spec.egressGateway.nodeSelector.matchExpressions) && object.spec.egressGateway.nodeSelector.matchExpressions.exists(e, e.key == 'egress-gw-active')))
+{{- end -}}
