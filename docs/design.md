@@ -1,71 +1,25 @@
 # cilium-egressgateway-ha 设计文档
 
+参考文档：
+
+- [Cilium Egress Gateway 行为分析](reference/cilium-behavior.md)：本项目依赖的 Cilium 行为和 kind 实测结果。
+- [设计细节](reference/design-details.md)：CRD 字段和 conditions、探测、agent、webhook、部署、RBAC，以及方案选择的理由。
+
 ## 1. 背景
 
-Cilium 社区版的 Egress Gateway 可以把匹配的 Pod 流量转发到指定网关节点，并 SNAT 成固定的出口 IP（egressIP）。但它**不提供网关高可用**：
+Cilium 社区版的 Egress Gateway 可以把匹配的 Pod 流量转发到网关节点，并 SNAT 成固定的出口 IP（egressIP）。但它**不提供网关高可用**：
 
-- 网关节点宕机后，流量不会切换到其他节点。
-- Cilium 不会配置或迁移 egressIP（VIP）。
+- Cilium 按 policy 的 nodeSelector 选择网关节点，**不检查节点是否健康**。网关节点宕机后，Cilium 仍然选择它，出口流量黑洞。
+- Cilium **不配置出口 IP**，只在网关节点上查找哪块网卡拥有这个 IP。找不到就丢弃流量，而且网卡上的 IP 变化后不会重新查找。
+- 同一个二层网络中，如果多个节点同时持有出口 IP，回包可能被送到错误的节点，流量全部失败。
 
-本项目通过一个运行在候选网关节点上的 DaemonSet，实现网关故障自动切换和 VIP 管理。
-
-## 2. Cilium 社区版行为分析
-
-以下结论基于 Cilium 源码（`pkg/egressgateway`）阅读，并在 kind 集群（Cilium v1.20.5，tunnel/vxlan，KPR）中验证。
-
-### 2.1 网关节点选择
-
-- 每个 cilium-agent 根据 policy 的 `egressGateway.nodeSelector` 匹配 **CiliumNode** 的 labels。
-- 多个节点同时匹配时，按节点名排序取第一个。
-- 选择时**不检查**节点 Ready 状态，也不检查 agent 是否存活，没有 health check。
-- 节点宕机后，它的 CiliumNode 仍然存在，labels 也不变。Cilium 会继续选择它，导致流量黑洞。operator 只会在 k8s Node 对象被删除后，才回收对应的 CiliumNode。
-
-### 2.2 CiliumNode labels 的来源
-
-- CiliumNode 的 labels 由**该节点自己的 cilium-agent** 从 k8s Node 同步过去，operator 不负责同步。
-- 节点正常时，修改 k8s Node 的 label 会自动同步到 CiliumNode，所有 agent 都能感知，**不需要重启 agent**。
-- 节点宕机后，它的 agent 也停止了。这时修改 k8s Node 的 label **不会同步**到 CiliumNode，必须直接修改 CiliumNode。
-- 节点恢复后，agent 会按 k8s Node 的 labels 覆盖 CiliumNode 的 labels。
-- 如果配置了 `exclude-node-label-patterns`，匹配的 label 不会同步到 CiliumNode。
-
-### 2.3 egressIP 的查找时机
-
-- Cilium **不会**把 egressIP 配置到网卡上。它只在网关节点上查找"哪块网卡拥有这个 IP"（或者这个 IP 是否被配置为 local route）。查找成功后，把 egressIP 写入 BPF egress map。
-- 查找失败时，egressIP 被写成 `0.0.0.0`，网关节点会以 `No Egress IP configured` 的原因丢弃流量。
-- 查找**由事件触发**。只有以下事件会让所有 agent 重新计算网关配置（`reconcileLocked` → `regenerateGatewayConfigs`）：
-  - policy 新增、修改或删除
-  - **任意** CiliumNode 新增、更新或删除
-  - agent 启动后首次同步完成
-- **网卡 IP 的增删不会触发重新查找。** 查找失败后，即使把 VIP 加到网卡上，流量也不会自动恢复。官方文档建议重新 apply policy。
-- 官方文档默认的使用前提是：egressIP 由运维**预先**配置在固定的网关节点上，然后再创建 policy。
-
-### 2.4 VIP 冲突
-
-- 同一个二层网络中，如果多个节点同时持有 VIP，外部设备通过 ARP 找到哪个节点是不确定的。回包可能被送到备节点。备节点上没有这条连接的 SNAT 状态，回包会被丢弃。实测 6/6 次请求全部失败。
-- 把 VIP 配到 `lo` 上也不能解决问题：默认 `arp_ignore=0` 时，`eth0` 仍然会响应 VIP 的 ARP。
-- 因此，**任何时刻只能有一个节点持有 VIP**。
-
-### 2.5 验证结果汇总
-
-| 场景 | 结果 |
-|---|---|
-| 主节点在线，去掉 Node label，VIP 未迁移 | gatewayIP 自动切到备节点，但备节点上没有 VIP，流量被丢弃 |
-| 在上一场景的基础上再迁移 VIP | 不会自动恢复，需要重建 policy |
-| 先迁移 VIP，再修改 label | 立即生效 |
-| 主节点宕机，不做任何处理 | 流量黑洞 |
-| 主节点宕机，去掉 Node label | 不会同步到 CiliumNode，流量不恢复 |
-| 主节点宕机，去掉 CiliumNode label（VIP 已迁移） | 立即恢复 |
-| 两个节点同时持有 VIP | 流量全部失败 |
-| VIP 晚于 policy 生效，然后 patch 本节点 CiliumNode 的 annotation | 立即恢复 |
-| VIP 晚于 policy 生效，然后给 Node 打非 `cilium.io` 前缀的 annotation | 不会同步，流量不恢复 |
-| VIP 晚于 policy 生效，然后给 Node 打 `xxx.cilium.io/` 前缀的 annotation | 同步到 CiliumNode，流量恢复 |
-
-## 3. 目标与非目标
+详细分析见 [Cilium Egress Gateway 行为分析](reference/cilium-behavior.md)。
 
 **目标**
 
-- 主网关节点故障时，自动把出口流量和 VIP 切换到备节点。
-- 任何时刻只有一个节点持有 VIP，并且只有一个节点被 Cilium 选为网关。
+- 主网关节点故障时，自动把出口 IP 和出口流量切换到备节点。
+- **控制面问题不影响数据面**：本项目的组件重启或升级、cilium-agent 重启、API Server 不可用，都不触发切换，也不中断出口流量。
+- 任何时刻只有一个节点持有出口 IP，并且只有这个节点被 Cilium 选为网关。
 - 不修改 Cilium，只使用社区版现有的行为。
 
 **非目标**
@@ -73,19 +27,191 @@ Cilium 社区版的 Egress Gateway 可以把匹配的 Pod 流量转发到指定�
 - 切换时保持已有连接不断开。旧网关上的 SNAT 状态不会迁移，已有连接会断开。
 - 在 API Server 不可用时完成切换。
 - 多个网关之间的负载均衡。
+- IPv6。
 
-## 4. 总体设计
+## 2. 原理
 
-### 4.1 节点 label
+![整体架构](images/architecture.png)
 
-| label | 维护者 | 含义 |
+### 2.1 组件和对象
+
+| 名称 | 形式 | 作用 |
 |---|---|---|
-| `egress-gw-candidate=true` | 运维手动打，固定不变 | 候选网关节点，DaemonSet 只运行在这些节点上 |
-| `egress-gw-active=true` | 程序自动维护 | 当前主网关。任何时刻最多只有一个节点有这个 label |
+| controller | Deployment，2 副本，运行在 master 节点上，用 Lease 选出一个工作实例 | 决定哪个节点是主网关；探测主网关；执行切换；维护 `egress-gw-active` label；提供 admission webhook |
+| agent | DaemonSet，运行在候选节点上，`hostNetwork: true` | 本节点是主网关时，把出口 IP 配到网卡上，并上报状态；不是主网关时，删除出口 IP |
+| `EgressGatewayHA` | 集群级 CR，全局只有一个，名字固定为 `default` | spec：候选节点、网卡、出口 IP、当前主网关 `activeNode`。status：切换进度和各节点状态 |
+| `egress-gw-active=true` | Node 和 CiliumNode 上的 label | 只打在主网关上。policy 的 nodeSelector 匹配这个 label，所以 Cilium 选中的网关一定是主网关 |
 
-### 4.2 Egress policy
+controller 只负责做决定，agent 只负责执行。
 
-policy 的 nodeSelector 要**同时**匹配这两个 label。这样即使 `egress-gw-active` 被误打到非候选节点上，Cilium 也不会选中它。
+### 2.2 数据面如何工作
+
+1. 用户的 policy 中，nodeSelector 写的是 `egress-gw-active: "true"`。所有 cilium-agent 都把带这个 label 的节点作为网关，业务 Pod 的出口流量经 VXLAN 送到这个节点。
+2. 主网关上的 agent 把出口 IP 以 /32 配到 `spec.interface` 上，并发送 GARP，让上游把出口 IP 指向这个节点。
+3. 主网关上的 cilium-agent 找到网卡上的出口 IP，在 BPF 中把出口流量 SNAT 成这个 IP。
+
+出口 IP 配好以后，转发只依赖两样东西：网卡上的出口 IP，以及 Cilium 的 BPF map。它和 controller、agent、API Server 都没有关系。这是"控制面问题不影响数据面"的基础：
+
+- agent 重启或升级时不删除出口 IP，新 Pod 启动后直接沿用。
+- controller 重启时，只是暂停切换决策。
+- API Server 不可用时，agent 保持网卡现状不变。
+
+### 2.3 两个关键约束
+
+- **任何时刻只有一个节点持有出口 IP**，否则回包会被送到错误的节点。
+- **先配置出口 IP，再打 label**。Cilium 只在 label 或 policy 变化时查找出口 IP，如果先打 label，查找会失败，而且不会重试。
+
+controller 用两阶段切换同时满足这两个约束：先让新节点配好出口 IP（新节点添加前先做重复地址检测），确认配好后，再把 label 移到新节点（见第 4 章）。
+
+### 2.4 主网关记录在哪里
+
+- **`spec.activeNode` 是主网关的唯一来源。** 默认为空，controller 选出主网关后写入；故障切换时由 controller 修改；运维修改这个字段就是手动切换。
+- `status.activeNode` 由主网关上的 agent 写入，展示这个节点上出口 IP 的实际状态：节点名、已经配置的出口 IP、是否全部配好、是否有冲突。
+- 切换是否完成，以 `egress-gw-active` label 实际所在的节点为准：label 还没有打在 `spec.activeNode` 上，说明正在切换，`Switching` condition 会写明从哪个节点切到哪个节点。
+- 其他 spec 字段的默认值来自 Helm values。controller 只在 CR 不存在时创建它，之后以 CR 为准。
+
+CRD 的完整字段和 conditions 见[设计细节](reference/design-details.md)第 1 章。
+
+## 3. 什么时候切换
+
+controller 的工作实例持续检查主网关，满足以下**任意一个**条件时，判定主网关故障：
+
+| 条件 | 典型原因 | 检测时间 |
+|---|---|---|
+| TCP 探测连续 3 次失败 | 节点宕机、网络不可达 | 约 16～21s |
+| Node 的 Ready condition 为 `False` 或 `Unknown` | kubelet 故障、节点和 API Server 断开 | 约 40～50s |
+
+另外两种情况也会切换：主网关不再匹配 `candidateNodeSelector`；运维修改了 `spec.activeNode`。
+
+### 3.1 TCP 探测规则
+
+- 探测主网关 InternalIP 上的 kubelet 端口（默认 10250）。
+- 串行探测：单次超时 2s；一次探测结束后，等 5s 再发起下一次；连续 3 次失败才判定故障。
+- **连接成功或被拒绝（`ECONNREFUSED`）都算存活。** 被拒绝说明节点内核收到了 SYN 并回了 RST，节点没有宕机，只是 kubelet 没有监听。
+- 连接超时，以及 `EHOSTUNREACH` 等其他错误，都算失败。
+- controller 自己的网络出问题时，所有节点都会探测失败。所以因 TCP 探测失败切换前，至少要有一个备选节点探测成功，否则不切换，只告警。
+
+为什么用 TCP 连接，而不是 ping 或 HTTP healthz，以及 kind 实测结果，见[设计细节](reference/design-details.md)第 2 章。
+
+### 3.2 各种事件的结果
+
+| 事件 | 是否切换 | 出口流量 |
+|---|---|---|
+| 主网关宕机或网络不可达 | 是 | 中断约 18～23s（推算值） |
+| 主网关 kubelet 停止，超过约 40～50s | 是（Node NotReady） | 切换前正常；切换时已有连接断开 |
+| 主网关 kubelet 短暂重启 | 否：TCP 连接被拒绝算存活，Node 还没有变为 NotReady | 不受影响 |
+| agent 升级、重启、被删除 | 否 | 不受影响 |
+| cilium-agent 重启 | 否 | 不受影响，BPF map 保持不变 |
+| controller 重启或副本切换 | 否 | 不受影响，切换决策暂停 |
+| API Server 不可用 | 否 | 不受影响 |
+| 主网关和 controller、API Server 之间网络分区，二层正常 | 尝试切换，但停在第一阶段（见 4.3） | 不受影响；分区恢复后完成切换，已有连接断开一次 |
+| 故障节点恢复 | 否，不切回 | 不受影响 |
+| 运维修改 `spec.activeNode` | 是 | 短暂中断，已有连接断开 |
+
+以下信号**不触发切换**，只记录 Event 和 metrics：
+
+- `NetworkUnavailable` condition：Cilium 只在启动时设置一次，不能反映运行时状态。
+- 主网关上的 agent Pod 未就绪、cilium-agent 未就绪：它们重启时，网卡上的出口 IP 和 BPF map 都保持不变。
+
+## 4. 如何切换
+
+![controller 工作流程](images/controller-workflow.png)
+
+### 4.1 选择新主网关
+
+可用的候选节点必须满足：匹配 `candidateNodeSelector`、TCP 探测成功、Node Ready、cilium-agent Ready、agent Pod Ready。后两个条件用来避开"切过去也无法转发"的节点：没有 agent，就没有人配置出口 IP；没有 cilium-agent，就不会下发 SNAT 配置。
+
+| 触发原因 | 选择规则 |
+|---|---|
+| 初次部署（`spec.activeNode` 为空） | 字典序第一个 |
+| 故障切换，或主网关不再是候选节点 | 按字典序排列可用节点，选排在当前主网关之后的下一个；当前主网关已经排在最后时，回到第一个 |
+| 手动切换 | 运维指定的节点 |
+
+例如候选节点为 node1、node2、node3，当前主网关是 node2：node2 故障时选 node3；node3 也不可用时选 node1。
+
+没有可用节点时保持现状，`Switching` condition 的 reason 为 `NoAvailableCandidate`。
+
+### 4.2 两阶段切换
+
+**第一阶段：配置出口 IP**
+
+1. controller 把 `spec.activeNode` 改为新节点（手动切换时，运维已经改好）。
+2. 新节点的 agent 对每个出口 IP 做重复地址检测（相当于 `arping -D`）。没有设备回应时，以 /32 添加到网卡上，发送 GARP，然后 patch 本节点 CiliumNode 的 annotation，触发 Cilium 重新查找出口 IP。
+3. 新节点的 agent 把 `status.activeNode` 写为 `{name: 新节点, egressIPs: [...], ready: true}`。
+4. 旧节点的 agent 如果还能访问 API Server，看到自己不再是主网关，会删除本机的出口 IP。
+
+**第二阶段：移动 label**
+
+controller 看到 `status.activeNode.name` 等于 `spec.activeNode`，并且 `ready` 为 true 后：
+
+1. 给新节点的 Node 和 CiliumNode 打上 `egress-gw-active=true`。所有 cilium-agent 把网关切到新节点，新节点上的出口 IP 已经存在，可以立即生效。
+2. 删除其他所有节点 Node 和 CiliumNode 上的这个 label。旧节点宕机时，它的 cilium-agent 不会把 Node label 的变化同步到 CiliumNode，所以要直接修改 CiliumNode。
+3. 设置 `Switching=False`，切换完成。
+
+controller 在切换中途重启时，新实例比较 `spec.activeNode`、label 所在的节点和 `status.activeNode`，从中断的位置继续。例如第二阶段中途重启，两个节点都带有 label 时，继续删除旧节点上的 label。
+
+### 4.3 双主防护
+
+- **重复地址检测**：旧节点还在回应出口 IP 的 ARP 时，新节点不添加出口 IP，切换停在第一阶段，reason 为 `EgressIPConflict`。
+- **出口 IP 配好之前不移动 label**：切换停在第一阶段时，label 仍然在旧节点上，流量仍然走旧节点。如果旧节点只是和 controller、API Server 断开，它的数据面仍然正常，**出口流量不中断**。
+- 旧节点恢复访问 API Server 后，它的 agent 会删除出口 IP；新节点的重复地址检测随之通过，切换完成。
+
+### 4.4 手动切换
+
+运维直接修改 `spec.activeNode`，例如维护前把主网关切走，或者故障恢复后切回原来的节点：
+
+```bash
+kubectl patch egressgatewayha default --type merge -p '{"spec":{"activeNode":"node1"}}'
+```
+
+- webhook 校验目标节点存在，并且是候选节点。
+- 之后按 4.2 的两阶段流程切换。
+- 目标节点不可用时，controller 把 `spec.activeNode` 恢复为当前带 label 的节点，并记录 Warning Event，reason 为 `TargetUnavailable`。
+
+## 5. 节点故障处理
+
+![主节点宕机切换时序](images/failover-sequence.png)
+
+### 5.1 主网关宕机
+
+| 时间 | 事件 |
+|---|---|
+| t0 | 主网关宕机，出口 IP 随之失效。CiliumNode 上的 label 仍然存在，Cilium 仍然把流量送到这个节点，出口流量黑洞 |
+| t0 + 16～21s | controller 连续 3 次 TCP 探测超时，确认有备选节点可达，选出 node2，写入 `spec.activeNode` |
+| 再过约 1s | node2 的 agent 做重复地址检测（宕机节点不再回应），添加出口 IP，发送 GARP，上报 `ready: true` |
+| 再过约 1s | controller 给 node2 打 label，删除旧节点 Node 和 CiliumNode 上的 label，所有 cilium-agent 把网关切到 node2，新建连接恢复 |
+
+总中断时间约 18～23s。以上时间是根据默认参数推算的，尚未实测。
+
+### 5.2 故障节点恢复
+
+- 出口 IP 只配置在内核中，不写入节点的网络配置文件，所以节点重启后出口 IP 已经不存在。
+- agent 启动后发现本节点不是 `spec.activeNode`，按地址 label（例如 `eth0:egw`）删除残留的出口 IP，然后作为备节点运行。
+- **不会自动切回**，以免已有连接再断开一次。需要切回时，由运维手动切换（见 4.4）。
+
+### 5.3 kubelet 故障
+
+- kubelet 停止约 40～50s 后，Node 变为 NotReady，触发切换。
+- 这时旧节点的数据面通常仍然正常，并且仍然持有出口 IP：
+  - 旧节点的 agent 能访问 API Server 时，会自己删除出口 IP，切换随即完成，已有连接断开。
+  - 旧节点的 agent 也无法访问 API Server 时，切换停在第一阶段，流量继续走旧节点（见 4.3）。
+- kubelet 升级前，建议先手动把主网关切走。
+
+### 5.4 agent 的启动和退出
+
+![agent 工作流程](images/agent-workflow.png)
+
+- **启动**：本节点是主网关时，确保出口 IP 存在，**不先删除**，直接沿用升级前留下的出口 IP；不是主网关时，删除本机的出口 IP。无法访问 API Server 时，保持网卡现状不变。
+- **运行中**：watch `EgressGatewayHA` 和 policy，并每 10s reconcile 一次。出口 IP 被其他组件删除时，会重新添加。
+- **退出（SIGTERM）**：不删除出口 IP，也不修改 label，所以 agent 升级不影响出口流量。例外：本节点已经不是候选节点，也不是主网关时，删除出口 IP。
+
+agent 的详细流程见[设计细节](reference/design-details.md)第 3 章。
+
+## 6. 使用
+
+### 6.1 Egress policy
+
+nodeSelector 中引用了 `egress-gw-active` 的 policy，就由本项目管理，不需要额外的 label 或 annotation：
 
 ```yaml
 apiVersion: cilium.io/v2
@@ -105,147 +231,81 @@ spec:
   egressGateway:
     nodeSelector:
       matchLabels:
-        egress-gw-candidate: "true"
         egress-gw-active: "true"
-    egressIP: 192.168.10.100
+    # egressIP 可以不写，由 webhook 填入 defaultEgressIP
 ```
 
-程序只管理 nodeSelector 中包含 `egress-gw-active` 的 policy，并把这些 policy 的 IPv4 `egressIP` 作为 VIP。所有被管理的 policy 共用同一个主网关，切换时所有 VIP 一起迁移。
+webhook 的规则：
 
-### 4.3 选主
+- nodeSelector **只能**是 `egress-gw-active: "true"`，不能有其他条件。否则当前主网关不满足其他条件时，流量会被丢弃。
+- egressIP 可以不写，由 webhook 补全为 `defaultEgressIP`。填写时，必须在 `spec.egressIPs` 中。
+- **不能填写 `interface`**。Cilium 不允许同时填写 `egressIP` 和 `interface`，否则会忽略整个 policy。出口 IP 配在哪块网卡，由 `EgressGatewayHA.spec.interface` 决定。
+- 多个 policy 可以使用同一个 egressIP。
+- 不匹配的 policy（nodeSelector 中没有 `egress-gw-active`）不会发送到 webhook，完全不受影响。
 
-- 候选节点上的每个 Pod 通过同一个 `coordination.k8s.io/Lease` 选主，可以使用 client-go 的 `leaderelection`。
-- 所有候选节点平等，不设首选节点；原主节点恢复后不会主动切回。
-- identity 使用节点名。
-- 建议参数：`LeaseDuration=15s`、`RenewDeadline=10s`、`RetryPeriod=2s`。必须满足 `LeaseDuration > RenewDeadline`，并留出余量。这样旧 leader 会先放弃 VIP，新 leader 之后才能抢到 Lease。
-- 主节点宕机后，切换时间大约是 `LeaseDuration + RetryPeriod`，约 15～17s，再加上 Cilium 下发配置的时间（秒级）。
+webhook 的完整规则见[设计细节](reference/design-details.md)第 4 章。
 
-### 4.4 方案选择
+### 6.2 Helm values
 
-#### 4.4.1 为什么不使用多节点匹配
+```yaml
+egressGatewayHA:                    # controller 创建 EgressGatewayHA default 时使用，只在 CR 不存在时生效
+  candidateNodeSelector:
+    matchLabels:
+      node-role.example.com/egress: "true"
+  interface: eth0
+  egressIPs:                        # 支持单个 IP 和地址范围
+  - 192.168.10.100-192.168.10.110
+  defaultEgressIP: ""               # 为空时取 egressIPs 中的第一个
 
-多节点匹配方案的做法是：policy 的 nodeSelector 只匹配候选节点，Cilium 按节点名排序后选第一个作为主节点。主节点故障时，由某个组件删除它的 label，Cilium 就会选择下一个节点。
+controller:
+  nodeProbe:
+    port: 10250                     # 探测节点上的 TCP 端口，默认是 kubelet 端口
+    timeout: 2s                     # 单次 TCP 连接超时，期间内核会自动重传 SYN
+    interval: 5s                    # 上一次探测结束后，等待多久发起下一次
+    failureThreshold: 3             # 连续失败多少次后判定节点故障
 
-这个方案能实现切换，但真正使用时还要回答三个问题：
+agent:
+  garpInterval: 0s                  # 周期性发送 GARP 的间隔，0 表示只在添加出口 IP 时发送
+  reconcileInterval: 10s            # agent 定期 reconcile 的间隔
+```
 
-- 谁来判断主节点故障？
-- 由谁来执行切换？
-- 怎样避免两个节点同时持有 VIP？
+`egressGatewayHA` 部分只在初次部署时使用。CR 创建后，修改配置需要直接修改 CR，`helm upgrade` 不会覆盖它。修改候选节点时，需要同时修改 CR 和 Helm value，因为 agent DaemonSet 的调度范围由 Helm value 决定。
 
-如果要把这三个问题都解决，最后还是需要 Lease 这类机制。
+### 6.3 查看状态
 
-| 问题 | 多节点匹配 | Lease 选主（本方案） |
-|---|---|---|
-| 谁是主节点 | 由 Cilium 按节点名排序决定。程序要自己复现 Cilium 的选择规则，才知道 VIP 应该配到哪个节点。这依赖 Cilium 的内部实现 | 由程序选主决定。policy 只匹配一个节点，所以 VIP 的位置和 Cilium 的选择总是一致 |
-| 故障检测 | 备节点需要自己判断主节点是否故障。如果监听 Node Ready，默认至少要 40s 才能检测到 | 以 Lease 过期作为故障信号。检测时间可以配置，约 15s |
-| 误判时是否双主 | **会。** 比如只有 kubelet 挂了，或者主节点连不上 API Server，但主节点的网络仍然正常。这时备节点删除主节点的 label 并加上 VIP，主节点却不知道自己已被替换，还继续持有 VIP。两个节点同时持有 VIP，流量会全部中断（见 2.4） | **不会。** 主节点无法续约时，会在 `RenewDeadline` 时主动删除 VIP。新主节点要等 `LeaseDuration` 过期后才能接管，两者在时间上错开 |
-| 多个备节点之间是否需要互斥 | 需要。有 3 个及以上候选节点时，多个备节点可能同时执行切换，需要另外加一把锁 | 不需要。Lease 本身就是互斥锁，同一时间只有一个节点执行切换 |
-| 故障节点恢复后 | 候选 label 已经被删除，需要运维手动加回，否则候选节点会越来越少 | 候选 label 一直保留，节点恢复后自动成为备节点 |
-| 是否强制切回 | **会。** 候选 label 加回后，原主节点的名字排序仍然最靠前，Cilium 会立即切回该节点。但 VIP 还在备节点上，流量会中断。这和"故障节点恢复后不切回"的决策冲突 | 不会。只有当前 leader 带有 active label |
+```console
+$ kubectl get egressgatewayha
+NAME      ACTIVE   REACHABLE   READY   AGE
+default   node1    True        True    3d
+```
 
-关于"主节点宕机后 VIP 无法迁移"：如果节点真的宕机，它已经无法响应 ARP，新主节点直接添加 VIP 并发送 GARP 即可，两个方案在这里没有区别。真正的风险是**误判**：主节点看起来故障了，但实际上还活着。多节点匹配方案没有办法让旧主节点主动放弃 VIP；Lease 方案可以让旧主节点在续约失败后自我隔离。
+`status.conditions` 按切换过程划分：
 
-所以，如果给多节点匹配补上故障检测、多个备节点之间的互斥，以及旧主节点的自我隔离，它最后就会变成 Lease 方案。剩下的区别只在于 label 的维护方式：多节点匹配需要反复删除和恢复候选 label，还会受到 Cilium 名字排序规则的影响；Lease 方案只切换一个 active label，候选节点集合不变。
-
-#### 4.4.2 为什么不在每个节点上预先配置 VIP
-
-把 VIP 预先配置在所有候选节点上，切换时就不需要迁移 VIP。但这个方案不可行：
-
-- VIP 配在普通网卡上时，多个节点会同时响应 ARP，回包可能被送到备节点并被丢弃。实测流量全部失败（见 2.4）。
-- VIP 配在 `lo` 上，并设置 `arp_ignore=1` 时，没有任何节点响应 ARP。上游需要通过静态路由或 BGP，把 VIP 指向当前主节点。这只是把"迁移 VIP"换成了"切换路由"，而且还要保证路由和 Cilium 选中的网关一致。在实际网络中很难落地。
-
-## 5. 流程
-
-### 5.1 Pod 启动
-
-1. **无条件**删除本机网卡上所有被管理的 VIP。
-2. 删除本节点 Node 上的 `egress-gw-active` label。
-3. 参与 Lease 选主。
-
-这里不需要先判断自己是不是主节点：刚启动的 Pod 不会是 leader。
-
-### 5.2 成为 leader（`OnStartedLeading`）
-
-顺序很重要：**先添加 VIP，再打 label。**
-
-1. 读取需要管理的 policy，得到 VIP 列表。
-2. 把 VIP 以 /32 添加到指定网卡上，然后发送 GARP。
-3. 给**本节点 Node** 打上 `egress-gw-active=true`。本机 agent 正常运行，label 会自动同步到 CiliumNode，并触发 Cilium 重新查找 egressIP。这时 VIP 已经在网卡上，可以一次查找成功。
-4. 查找其他带有 `egress-gw-active=true` 的节点，删除它们 **Node 和 CiliumNode** 上的这个 label。旧 leader 可能已经宕机，它的 agent 不会同步 Node 上的 label 变化，所以 CiliumNode 必须单独处理。
-
-### 5.3 作为 leader 运行
-
-- 监听 policy 变化：
-  - 新增 egressIP 时：添加 VIP，发送 GARP，然后 **patch 本节点 CiliumNode 的 annotation**，例如 `egress-gw-ha/vip-synced=<timestamp>`，触发 Cilium 重新查找 egressIP。原因是 Cilium 收到 policy 事件时 VIP 还没加上，查找会失败，而且不会自动重试。
-  - 删除 egressIP 时：删除对应的 VIP。
-- 定期 reconcile，例如每 10s 一次：
-  - 检查 VIP 是否还在网卡上。如果被 NetworkManager 或 systemd-networkd 等组件删除，就重新添加，然后 patch annotation。
-  - 检查是否只有本节点有 `egress-gw-active`。
-- annotation 只用来触发事件，不作为持久状态使用。agent 会覆盖 CiliumNode 的 annotations。
-- 任意 CiliumNode 变化都会让所有 agent 重新计算网关配置，所以只在 VIP 变化后触发，不要频繁 patch。
-
-### 5.4 失去 leader 身份（`OnStoppedLeading`）
-
-这种情况通常是因为 Lease 无法续约，例如本节点连不上 API Server。
-
-1. **立即删除本机所有 VIP。** 这一步只操作本机网卡，不依赖 API Server。
-2. 尽量删除本节点的 `egress-gw-active` label。失败也没关系，新 leader 会删除。
-3. 退出进程，由 kubelet 重启 Pod 后进入 5.1 流程。
-
-### 5.5 收到 SIGTERM（滚动升级、驱逐、节点维护）
-
-1. 删除本机 VIP。
-2. 删除本节点 Node 上的 `egress-gw-active` label。
-3. 释放 Lease（`ReleaseOnCancel=true`），让备节点尽快接管。
-
-### 5.6 主节点宕机
-
-| 时间 | 事件 |
+| condition | 含义 |
 |---|---|
-| t0 | 主节点宕机，Pod、agent 和 VIP 都失效，CiliumNode label 仍然存在，流量黑洞 |
-| t0 + ~15s | Lease 过期，备节点抢到 Lease，执行 5.2 流程 |
-| t0 + ~16s | 备节点添加 VIP 并发送 GARP，给自己打 label，删除旧主节点 Node 和 CiliumNode 上的 label |
-| t0 + ~17s | 所有 agent 把 gatewayIP 切到新主节点，新建连接恢复 |
-| 旧主节点恢复 | Pod 启动后执行 5.1，确认没有 VIP。agent 按 Node labels 覆盖 CiliumNode，此时已经没有 active label，因此不会抢回主网关角色 |
+| `ActiveNodeElected` | 已经选出主网关，label 已经在这个节点上 |
+| `ActiveNodeReachable` | 主网关的 TCP 探测结果 |
+| `ActiveNodeReady` | 主网关 Node 的 Ready 状态 |
+| `Switching` | 正在切换，reason 说明当前停在哪一步 |
+| `GatewayReady` | 出口 IP 已经配到主网关的网卡上（由主网关的 agent 写入） |
+| `Ready` | 以上都正常 |
 
-## 6. 部署
-
-### 6.1 DaemonSet 要求
-
-- `nodeSelector: egress-gw-candidate: "true"`
-- `hostNetwork: true`
-- capabilities：`NET_ADMIN`（增删 IP）、`NET_RAW`（发送 GARP）
-- `terminationGracePeriodSeconds` 要留出足够时间，用于删除 VIP 和释放 Lease。
-
-### 6.2 RBAC
-
-| 资源 | 动作 |
-|---|---|
-| `coordination.k8s.io/leases`（本命名空间） | get, create, update |
-| `nodes` | get, list, watch, patch |
-| `cilium.io/ciliumnodes` | get, list, watch, patch |
-| `cilium.io/ciliumegressgatewaypolicies` | get, list, watch |
-
-### 6.3 配置参数
-
-| 参数 | 说明 |
-|---|---|
-| `--interface` | VIP 所在网卡。不指定时，自动选择和 VIP 同网段的网卡 |
-| `--candidate-label` / `--active-label` | label key，默认 `egress-gw-candidate` / `egress-gw-active` |
-| `--lease-name` / `--lease-namespace` | Lease 对象的名称和命名空间 |
-| `--lease-duration` / `--renew-deadline` / `--retry-period` | 选主参数 |
+reason 和 message 的详细说明见[设计细节](reference/design-details.md)第 1.3 节。
 
 ## 7. 限制与风险
 
-- **已有连接会中断**：切换网关时，旧网关上的 SNAT 状态会丢失，已有 TCP 长连接需要应用重新连接。
-- **依赖 API Server**：API Server 不可用时，leader 无法续约，会主动删除 VIP，导致出口中断。这是为了避免双主而做的保守取舍。
-- **时钟偏差**：Lease 依赖各节点时钟大致同步，需要部署 NTP。
+- **已有连接会断开**：切换时旧网关上的 SNAT 状态不会迁移，TCP 长连接需要应用重新建立。
+- **kubelet 故障会触发切换**：kubelet 停止或升级超过约 40～50s，Node 变为 NotReady，会触发切换。kubelet 升级前，建议先手动切走主网关。
+- **网络分区恢复时可能短暂双主**：旧主网关在二层也被完全隔离时，新节点的重复地址检测会通过，切换完成。分区恢复时，如果旧节点的 agent 也不可用（例如一直 CrashLoop），两个节点会同时持有出口 IP，直到旧节点的 agent 恢复。需要依靠告警发现。
+- **重复地址检测的局限**：旧节点仍然回应 ARP，但已经无法转发，并且它的 agent 也无法访问 API Server 时，切换会一直停在第一阶段，出口中断，需要人工处理。
+- **只有一个观察点**：探测只从 controller 所在节点发起。如果只是 controller 到主网关这一条路径故障，会尝试切换，但重复地址检测会阻止新节点添加出口 IP，流量继续走旧节点。
+- **探测端口的防火墙**：
+  - 中间防火墙对 `nodeProbe.port` 直接丢包时，探测会超时，节点会被误判为故障。
+  - 中间防火墙代替节点回 RST 时，节点宕机后探测仍然被判定为存活，故障检测不到。
+  - 节点本机防火墙的 REJECT 没有问题，因为能回 RST 本身就说明节点还活着。
+- **出口网卡和探测网卡不同**：探测的是 InternalIP 所在的网卡。如果出口 IP 配在另一块网卡上，出口网卡断开时不会触发切换。这种部署需要另外监控出口网卡的链路状态。
+- **新节点的 agent 不可用时无法切换**：所以选择新主网关时会检查 agent Pod 是否 Ready。生产环境建议至少部署 3 个候选节点。
+- **GitOps**：controller 会修改 `spec.activeNode`。用 ArgoCD、Flux 管理 `EgressGatewayHA` 时，需要忽略这个字段，否则会被改回去，触发一次切换。
 - **GARP**：上游交换机或路由器必须接受 GARP，并及时更新 ARP 表。
-- **外部组件冲突**：节点上的网络管理组件可能会删除程序添加的 VIP。程序通过定期 reconcile 恢复 VIP，但仍然要避免这类组件管理该网卡。
-- **Cilium 行为依赖**：本设计依赖 Cilium 的内部行为，例如 CiliumNode 更新会触发重新查找 egressIP。升级 Cilium 前需要重新验证。
-
-## 8. 设计决策
-
-1. **不设首选主节点**：所有候选节点平等，完全按照 Lease 选主结果决定主节点。原主节点恢复后作为备节点运行，不主动切回。
-2. **共用一个 Lease 和一个 active label**：所有被管理的 policy 共用同一个主网关。切换时，所有 VIP 一起迁移到新 leader。
-3. **只支持 IPv4**：只管理 `egressIP` 为 IPv4 地址的 policy。`egressIP` 为 IPv6、或者未指定 `egressIP`（使用 `interface` 或默认路由网卡）的 policy 会被忽略，并输出日志。
+- **外部组件冲突**：节点上的网络管理组件可能会删除出口 IP。agent 会定期 reconcile 恢复，但仍然要避免这类组件管理该网卡。
+- **依赖 Cilium 的内部行为**：例如 CiliumNode 更新会触发重新查找出口 IP。升级 Cilium 前需要重新验证（见 [Cilium Egress Gateway 行为分析](reference/cilium-behavior.md)）。
