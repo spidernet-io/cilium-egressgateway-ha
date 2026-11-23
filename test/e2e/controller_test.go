@@ -98,6 +98,9 @@ func waitSteady(t *testing.T, c client.Client, want string) string {
 			return fmt.Errorf("active label on Node %v, CiliumNode %v", nodes, cns)
 		}
 		for _, n := range allNodes {
+			if !running(n) {
+				continue
+			}
 			ips := managedIPs(t, n)
 			if wantIPs := []string(nil); n == active && !slices.Equal(ips, []string{egressIP}) ||
 				n != active && !slices.Equal(ips, wantIPs) {
@@ -150,13 +153,36 @@ func kubectl(t *testing.T, args ...string) {
 	}
 }
 
-func waitAgentReady(t *testing.T, c client.Client, node string) {
+// waitUsable waits until node can become the active node again: Node Ready,
+// and the cilium-agent and agent pods on it Ready.
+func waitUsable(t *testing.T, c client.Client, node string) {
 	t.Helper()
-	eventually(t, steadyTimeout, "agent ready on "+node, func() error {
+	eventually(t, 3*time.Minute, node+" usable", func() error {
+		ctx := context.Background()
+		n := &corev1.Node{}
+		if err := c.Get(ctx, client.ObjectKey{Name: node}, n); err != nil {
+			return err
+		}
+		ready := false
+		for _, cond := range n.Status.Conditions {
+			ready = ready || cond.Type == corev1.NodeReady && cond.Status == corev1.ConditionTrue
+		}
+		if !ready {
+			return fmt.Errorf("%s not Ready", node)
+		}
 		if !podReady(agentPod(t, c, node)) {
 			return fmt.Errorf("agent pod on %s not ready", node)
 		}
-		return nil
+		pods := &corev1.PodList{}
+		if err := c.List(ctx, pods, client.InNamespace("kube-system"), client.MatchingLabels{"k8s-app": "cilium"}); err != nil {
+			return err
+		}
+		for i := range pods.Items {
+			if p := &pods.Items[i]; p.Spec.NodeName == node && podReady(p) {
+				return nil
+			}
+		}
+		return fmt.Errorf("cilium-agent on %s not ready", node)
 	})
 }
 
@@ -165,6 +191,7 @@ func TestController(t *testing.T) {
 	c := newClient(t)
 
 	t.Cleanup(func() {
+		_, _ = command("docker", "start", worker1)
 		_, _ = command("docker", "exec", worker1, "systemctl", "start", "kubelet")
 		_, _ = command("docker", "exec", worker3, "ip", "addr", "del", egressIP+"/32", "dev", "eth0")
 		for _, n := range []string{controlPlane, worker1, worker2} {
@@ -258,7 +285,7 @@ func TestController(t *testing.T) {
 		expectElected(t, c, v1alpha1.ReasonCandidateRemoved, removed+" no longer matches candidateNodeSelector")
 		waitSourceIP(t, egressIP)
 		kubectl(t, "label", "node", removed, candidateKey+"=true")
-		waitAgentReady(t, c, removed)
+		waitUsable(t, c, removed)
 		waitSteady(t, c, active)
 	})
 
@@ -285,20 +312,63 @@ func TestController(t *testing.T) {
 		waitSourceIP(t, egressIP)
 
 		dockerExec(t, worker1, "systemctl", "start", "kubelet")
-		eventually(t, steadyTimeout, worker1+" Ready", func() error {
-			n := &corev1.Node{}
-			if err := c.Get(ctx, client.ObjectKey{Name: worker1}, n); err != nil {
-				return err
-			}
-			for _, cond := range n.Status.Conditions {
-				if cond.Type == corev1.NodeReady && cond.Status == corev1.ConditionTrue {
-					return nil
-				}
-			}
-			return fmt.Errorf("%s not Ready", worker1)
-		})
-		waitAgentReady(t, c, worker1)
+		waitUsable(t, c, worker1)
 		time.Sleep(15 * time.Second)
 		waitSteady(t, c, worker2)
+	})
+
+	t.Run("crashed active node fails over by TCP probe and is not switched back", func(t *testing.T) {
+		setActiveNode(t, c, worker1)
+		active = waitSteady(t, c, worker1)
+		waitSourceIP(t, egressIP)
+
+		start := time.Now()
+		if out, err := command("docker", "kill", worker1); err != nil {
+			t.Fatalf("docker kill: %v: %s", err, out)
+		}
+		var switched time.Duration
+		eventually(t, time.Minute, "failover away from "+worker1, func() error {
+			egw, err := getEGWHA(ctx, c)
+			if err != nil {
+				return err
+			}
+			if egw.Spec.ActiveNode == worker1 {
+				return fmt.Errorf("still on %s", worker1)
+			}
+			switched = time.Since(start)
+			return nil
+		})
+		// Poll the egress path quickly to measure when traffic recovers.
+		eventually(t, time.Minute, "egress traffic recovered", func() error {
+			out, err := command("kubectl", "exec", "client", "--", "curl", "-sS", "-m", "1", "http://"+targetAddr+"/clientip")
+			if err != nil || !strings.HasPrefix(out, egressIP+":") {
+				return fmt.Errorf("%v: %s", err, out)
+			}
+			return nil
+		})
+		recovered := time.Since(start)
+		active = waitSteady(t, c, worker2)
+		t.Logf("crash -> spec.activeNode=%s: %v, crash -> egress traffic recovered: %v",
+			active, switched.Round(100*time.Millisecond), recovered.Round(100*time.Millisecond))
+		expectElected(t, c, v1alpha1.ReasonFailover, "probes to ")
+		if switched > 30*time.Second {
+			t.Errorf("failover took %v, want it detected by the TCP probe (about 16-21s)", switched)
+		}
+
+		if out, err := command("docker", "start", worker1); err != nil {
+			t.Fatalf("docker start: %v: %s", err, out)
+		}
+		waitUsable(t, c, worker1)
+		time.Sleep(15 * time.Second)
+		waitSteady(t, c, worker2)
+		egw, err := getEGWHA(ctx, c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, cand := range egw.Status.Candidates {
+			if !cand.Reachable {
+				t.Errorf("status.candidates = %+v, want all reachable after recovery", egw.Status.Candidates)
+			}
+		}
 	})
 }

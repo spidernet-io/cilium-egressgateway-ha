@@ -56,9 +56,9 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	enqueue := handler.EnqueueRequestsFromMapFunc(func(context.Context, client.Object) []reconcile.Request {
 		return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: v1alpha1.SingletonName}}}
 	})
-	// Reconcile once at start so that the default object is created.
-	start := make(chan event.GenericEvent, 1)
-	start <- event.GenericEvent{Object: &v1alpha1.EgressGatewayHA{}}
+	// Reconcile once at start so that the default object is created, and on Notify.
+	r.trigger = make(chan event.GenericEvent, 1)
+	r.Notify()
 	return ctrl.NewControllerManagedBy(mgr).
 		Named("egressgatewayha").
 		// Status changes matter: the agent reports readiness through status.
@@ -66,7 +66,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&corev1.Node{}, enqueue, builder.WithPredicates(nodeChanged)).
 		Watches(&ciliumv2.CiliumNode{}, enqueue, builder.WithPredicates(predicate.LabelChangedPredicate{})).
 		Watches(&corev1.Pod{}, enqueue).
-		WatchesRawSource(source.Channel(start, enqueue)).
+		WatchesRawSource(source.Channel(r.trigger, enqueue)).
 		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
 		Complete(r)
 }

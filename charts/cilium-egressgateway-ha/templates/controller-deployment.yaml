@@ -50,6 +50,10 @@ spec:
         args:
         - --default-spec=/etc/egressgateway-ha/default-spec.yaml
         - --resync-interval={{ .Values.controller.resyncInterval }}
+        - --probe-port={{ .Values.controller.nodeProbe.port }}
+        - --probe-timeout={{ .Values.controller.nodeProbe.timeout }}
+        - --probe-interval={{ .Values.controller.nodeProbe.interval }}
+        - --probe-failure-threshold={{ .Values.controller.nodeProbe.failureThreshold }}
         - --cilium-namespace={{ .Values.controller.ciliumNamespace }}
         - --cilium-agent-selector={{ .Values.controller.ciliumAgentSelector }}
         - --agent-selector=app.kubernetes.io/instance={{ .Release.Name }},app.kubernetes.io/component=agent

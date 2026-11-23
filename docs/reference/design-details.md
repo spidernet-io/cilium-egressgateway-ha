@@ -55,7 +55,7 @@ status:
 | type | 写入方 | 含义 | reason | message 示例 |
 |---|---|---|---|---|
 | `ActiveNodeElected` | controller | 已经选出主网关，并且 label 已经在这个节点上 | `Initial`（初次部署）、`Failover`（故障切换）、`Manual`（运维修改）、`CandidateRemoved`（原主网关不再是候选节点） | `node2 became active node, failover from node1: probe failed` |
-| `ActiveNodeReachable` | controller | 主网关的 TCP 探测结果 | `ProbeSucceeded`、`ProbeFailed` | `3/3 probes to 172.18.0.3:10250 failed: i/o timeout` |
+| `ActiveNodeReachable` | controller | 主网关的 TCP 探测结果 | `ProbeSucceeded`、`ProbeFailed`；还没有探测结果时为 `Probing`，没有主网关时为 `NoActiveNode`（status 都为 Unknown） | `3/3 probes to 172.18.0.3:10250 failed: i/o timeout` |
 | `ActiveNodeReady` | controller | 主网关 Node 的 Ready 状态 | 沿用 Node Ready condition 的 reason，例如 `KubeletReady`、`NodeStatusUnknown`；Node 不存在时为 `NodeNotFound`；还没有主网关时为 `NoActiveNode`（status 为 Unknown） | `node1 NotReady since 08:00:01: Kubelet stopped posting node status` |
 | `Switching` | controller | `egress-gw-active` label 还没有打在 `spec.activeNode` 节点上，正在切换 | `WaitingForGateway`、`EgressIPConflict`、`NoAvailableCandidate`、`TargetUnavailable`、`Completed` | `switching node1 -> node2: waiting for egress IPs on node2` |
 | `GatewayReady` | 主网关的 agent | 所有出口 IP 都已经配置到主网关的网卡上 | `EgressIPsConfigured`、`EgressIPConflict`、`InterfaceNotFound`、`ConfigureFailed` | `192.168.10.100 is answered by aa:bb:cc:dd:ee:ff, not added` |
@@ -109,7 +109,15 @@ controller 向节点的 InternalIP 发起 TCP 连接，目标端口为 `nodeProb
 
 实现时必须按错误码区分，**只有 `ECONNREFUSED` 视为存活**，不能把所有"立即返回的错误"都当作存活。
 
-探测只有 controller 一个观察点。为了避免 controller 所在节点自己的网络问题被误判为主网关故障，因 TCP 探测失败而切换前，还要确认至少有一个备选节点 TCP 探测成功。如果所有候选节点都探测失败，判定为 controller 自己的网络问题，不切换，只告警。
+探测只有 controller 一个观察点。为了避免 controller 所在节点自己的网络问题被误判为主网关故障，因 TCP 探测失败而切换前，还要确认至少有一个备选节点 TCP 探测成功。如果所有候选节点都探测失败，判定为 controller 自己的网络问题，不切换，只告警：`Switching` 的 reason 为 `NoAvailableCandidate`，message 写明其他候选节点也都不可达，并记录 Warning Event。
+
+实现细节：
+
+- 探测目标是所有候选节点，以及当前主网关（即使它已经不是候选节点），地址是 Node 的第一个 IPv4 InternalIP。没有 IPv4 InternalIP 的节点不能被选为主网关。
+- 只有 Lease 选出的工作实例会探测。探测结果变化时（第一次有结果、成功和失败互相转换、连续失败次数变化），立即触发一次 reconcile。
+- 选择新主网关时，要求节点**最近一次**探测成功；判定主网关故障时，要求**连续失败达到** `failureThreshold`。所以只失败过 1、2 次的节点不会被选为新主网关，但如果它是主网关，也不会因此被切走。
+- `status.candidates` 中，还没有探测结果的节点 `reachable` 为 false。
+- controller 重启或者工作实例切换后，在第一次探测完成之前，保留原来的 `ActiveNodeReachable`，避免 `Ready` 短暂变为 False。
 
 ### 2.2 为什么用 TCP 连接
 

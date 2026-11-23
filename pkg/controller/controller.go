@@ -16,6 +16,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/netip"
+	"slices"
 	"time"
 
 	ciliumv2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
@@ -28,10 +30,12 @@ import (
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/spidernet-io/cilium-egressgateway-ha/api/v1alpha1"
+	"github.com/spidernet-io/cilium-egressgateway-ha/pkg/probe"
 )
 
 const (
@@ -58,9 +62,15 @@ type Config struct {
 	Default *v1alpha1.EgressGatewayHASpec
 }
 
-// StatusWriter applies the conditions owned by the controller.
+// StatusWriter applies the status fields owned by the controller.
 type StatusWriter interface {
-	Apply(ctx context.Context, conds []metav1.Condition) error
+	Apply(ctx context.Context, conds []metav1.Condition, candidates []v1alpha1.CandidateStatus) error
+}
+
+// Prober probes nodes with TCP connections, see package probe.
+type Prober interface {
+	SetTargets(map[string]netip.Addr)
+	Get(name string) (probe.Result, bool)
 }
 
 type Reconciler struct {
@@ -73,8 +83,18 @@ type Reconciler struct {
 	Recorder events.EventRecorder
 	Config   Config
 	Now      func() time.Time
-	// Reachable returns the TCP probe result of a node; nil treats all nodes as reachable.
-	Reachable func(name string) (ok bool, msg string)
+	// Prober probes the candidate nodes; nil treats all nodes as reachable.
+	Prober Prober
+
+	trigger chan event.GenericEvent
+}
+
+// Notify triggers a reconcile, e.g. when a probe result changes.
+func (r *Reconciler) Notify() {
+	select {
+	case r.trigger <- event.GenericEvent{Object: &v1alpha1.EgressGatewayHA{}}:
+	default:
+	}
 }
 
 func (r *Reconciler) now() time.Time {
@@ -108,7 +128,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (ctrl.R
 		log.Error(err, "invalid spec.candidateNodeSelector, not reconciling")
 		return ctrl.Result{}, nil
 	}
-	snap, err := r.snapshot(ctx, sel)
+	snap, err := r.snapshot(ctx, sel, egw.Spec.ActiveNode)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -150,7 +170,7 @@ func (r *Reconciler) createDefault(ctx context.Context) error {
 	return nil
 }
 
-func (r *Reconciler) snapshot(ctx context.Context, sel labels.Selector) (*snapshot, error) {
+func (r *Reconciler) snapshot(ctx context.Context, sel labels.Selector, active string) (*snapshot, error) {
 	nodes := &corev1.NodeList{}
 	if err := r.Client.List(ctx, nodes); err != nil {
 		return nil, err
@@ -180,7 +200,10 @@ func (r *Reconciler) snapshot(ctx context.Context, sel labels.Selector) (*snapsh
 	}
 	s := newSnapshot(sel, nodes.Items, cns.Items, ciliumPods.Items, agentPods.Items)
 	s.setLabels(labelledNodes.Items, labelledCNs.Items)
-	s.reachable = r.Reachable
+	if r.Prober != nil {
+		r.Prober.SetTargets(s.probeTargets(active))
+		s.probe = r.Prober.Get
+	}
 	return s, nil
 }
 
@@ -245,7 +268,7 @@ func (st *state) run(ctx context.Context) error {
 	if reason, msg, failed := st.snap.failure(active); failed {
 		to := st.snap.next(active)
 		if to == "" {
-			st.noCandidate(fmt.Sprintf("switching %s -> %s: %s, and no other available candidate", orNone(st.sw.From), active, msg))
+			st.noFailoverTarget(active, fmt.Sprintf("switching %s -> %s: %s", orNone(st.sw.From), active, msg))
 			return nil
 		}
 		return st.start(ctx, st.sw.From, to, reason, msg)
@@ -307,7 +330,7 @@ func (st *state) steady(ctx context.Context) error {
 	if reason, msg, failed := st.snap.failure(active); failed {
 		to := st.snap.next(active)
 		if to == "" {
-			st.noCandidate(fmt.Sprintf("%s, and no other available candidate", msg))
+			st.noFailoverTarget(active, msg)
 			return nil
 		}
 		return st.start(ctx, active, to, reason, msg)
@@ -364,6 +387,17 @@ func (st *state) noCandidate(msg string) {
 		st.event(corev1.EventTypeWarning, v1alpha1.ReasonNoAvailableCandidate, msg)
 	}
 	st.conds.set(v1alpha1.ConditionSwitching, metav1.ConditionTrue, v1alpha1.ReasonNoAvailableCandidate, msg)
+}
+
+// noFailoverTarget keeps the failed active node. When no other candidate is
+// reachable either, the controller's own network is the likely cause.
+func (st *state) noFailoverTarget(active, msg string) {
+	if st.snap.probe != nil && !st.snap.otherReachable(active) {
+		st.noCandidate(msg + "; no other candidate is reachable from the controller either, " +
+			"not switching (check the network of the controller node)")
+		return
+	}
+	st.noCandidate(msg + ", and no other available candidate")
 }
 
 func (st *state) candidatesSummary() string {
@@ -475,6 +509,7 @@ func (st *state) finishConditions() {
 		}
 		c.set(v1alpha1.ConditionActiveNodeReady, metav1.ConditionFalse, n.readyReason, msg)
 	}
+	st.setReachable()
 	if _, ok := c.get(v1alpha1.ConditionActiveNodeElected); !ok {
 		c.set(v1alpha1.ConditionActiveNodeElected, metav1.ConditionFalse, v1alpha1.ReasonInitial, "no active node elected yet")
 	}
@@ -508,10 +543,48 @@ func (st *state) finishConditions() {
 	}
 }
 
-func (st *state) applyStatus(ctx context.Context) error {
-	conds, changed := st.conds.result(st.egw.Generation)
-	if !changed {
+// setReachable sets ActiveNodeReachable from the probe of the active node. A
+// result that is not available yet, e.g. right after a controller restart,
+// keeps the previous condition so that Ready does not flap.
+func (st *state) setReachable() {
+	if st.r.Prober == nil {
+		return
+	}
+	active := st.egw.Spec.ActiveNode
+	if active == "" {
+		st.conds.set(v1alpha1.ConditionActiveNodeReachable, metav1.ConditionUnknown, "NoActiveNode", "no active node selected")
+		return
+	}
+	res, ok := st.r.Prober.Get(active)
+	switch {
+	case ok && res.Probed && res.Failed():
+		st.conds.set(v1alpha1.ConditionActiveNodeReachable, metav1.ConditionFalse, v1alpha1.ReasonProbeFailed, res.Message())
+	case ok && res.Probed:
+		st.conds.set(v1alpha1.ConditionActiveNodeReachable, metav1.ConditionTrue, v1alpha1.ReasonProbeSucceeded, res.Message())
+	case !st.conds.has(v1alpha1.ConditionActiveNodeReachable):
+		st.conds.set(v1alpha1.ConditionActiveNodeReachable, metav1.ConditionUnknown, "Probing",
+			fmt.Sprintf("TCP probe to %s not finished yet", active))
+	}
+}
+
+// candidates returns status.candidates: the TCP probe result of each candidate.
+func (st *state) candidates() []v1alpha1.CandidateStatus {
+	if st.r.Prober == nil {
 		return nil
 	}
-	return st.r.Status.Apply(ctx, conds)
+	var out []v1alpha1.CandidateStatus
+	for _, name := range st.snap.candidateNames() {
+		res, _ := st.r.Prober.Get(name)
+		out = append(out, v1alpha1.CandidateStatus{Name: name, Reachable: res.Reachable()})
+	}
+	return out
+}
+
+func (st *state) applyStatus(ctx context.Context) error {
+	conds, changed := st.conds.result(st.egw.Generation)
+	cands := st.candidates()
+	if !changed && slices.Equal(cands, st.egw.Status.Candidates) {
+		return nil
+	}
+	return st.r.Status.Apply(ctx, conds, cands)
 }

@@ -97,7 +97,7 @@ controller 的工作实例持续检查主网关，满足以下**任意一个**�
 
 | 事件 | 是否切换 | 出口流量 |
 |---|---|---|
-| 主网关宕机或网络不可达 | 是 | 中断约 18～23s（推算值） |
+| 主网关宕机或网络不可达 | 是 | 中断约 18～23s（kind 实测 19～23s） |
 | 主网关 kubelet 停止，超过约 40～50s | 是（Node NotReady） | 切换前正常；切换时已有连接断开 |
 | 主网关 kubelet 短暂重启 | 否：TCP 连接被拒绝算存活，Node 还没有变为 NotReady | 不受影响 |
 | agent 升级、重启、被删除 | 否 | 不受影响 |
@@ -181,7 +181,7 @@ kubectl patch egressgatewayha default --type merge -p '{"spec":{"activeNode":"no
 | 再过约 1s | node2 的 agent 做重复地址检测（宕机节点不再回应），添加出口 IP，发送 GARP，上报 `ready: true` |
 | 再过约 1s | controller 给 node2 打 label，删除旧节点 Node 和 CiliumNode 上的 label，所有 cilium-agent 把网关切到 node2，新建连接恢复 |
 
-总中断时间约 18～23s。以上时间是根据默认参数推算的，尚未实测。
+总中断时间约 18～23s。以上时间是根据默认参数推算的。kind 中用 `docker kill` 杀掉主网关实测两次：controller 分别在 17.1s、21.1s 后写入新的 `spec.activeNode`，出口流量分别在 18.9s、22.9s 后恢复。
 
 ### 5.2 故障节点恢复
 

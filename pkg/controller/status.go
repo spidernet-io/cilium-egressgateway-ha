@@ -82,7 +82,7 @@ type ClientStatusWriter struct {
 	Client client.Client
 }
 
-func (w *ClientStatusWriter) Apply(ctx context.Context, conds []metav1.Condition) error {
+func (w *ClientStatusWriter) Apply(ctx context.Context, conds []metav1.Condition, candidates []v1alpha1.CandidateStatus) error {
 	list := make([]any, 0, len(conds))
 	for _, c := range conds {
 		list = append(list, map[string]any{
@@ -100,6 +100,13 @@ func (w *ClientStatusWriter) Apply(ctx context.Context, conds []metav1.Condition
 		"metadata":   map[string]any{"name": v1alpha1.SingletonName},
 		"status":     map[string]any{"conditions": list},
 	}}
+	if len(candidates) > 0 {
+		cl := make([]any, 0, len(candidates))
+		for _, c := range candidates {
+			cl = append(cl, map[string]any{"name": c.Name, "reachable": c.Reachable})
+		}
+		u.Object["status"].(map[string]any)["candidates"] = cl
+	}
 	return w.Client.Status().Apply(ctx, client.ApplyConfigurationFromUnstructured(u),
 		client.FieldOwner(FieldManager), client.ForceOwnership)
 }

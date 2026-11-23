@@ -2,6 +2,7 @@ package controller
 
 import (
 	"fmt"
+	"net/netip"
 	"slices"
 	"strings"
 
@@ -11,13 +12,16 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 
 	"github.com/spidernet-io/cilium-egressgateway-ha/api/v1alpha1"
+	"github.com/spidernet-io/cilium-egressgateway-ha/pkg/probe"
 )
 
 // nodeInfo is everything the controller knows about one node.
 type nodeInfo struct {
 	name string
 	// exists is false when only the CiliumNode is left.
-	exists      bool
+	exists bool
+	// ip is the IPv4 InternalIP used for TCP probes.
+	ip          netip.Addr
 	candidate   bool
 	ready       bool
 	readyReason string
@@ -36,8 +40,8 @@ func (n *nodeInfo) labelled() bool { return n.nodeLabel || n.ciliumNodeLabel }
 // snapshot is the cluster state used by one reconcile.
 type snapshot struct {
 	nodes map[string]*nodeInfo
-	// reachable reports TCP probe results; nil treats every node as reachable.
-	reachable func(name string) (ok bool, msg string)
+	// probe returns the TCP probe result of a node; nil treats every node as reachable.
+	probe func(name string) (probe.Result, bool)
 }
 
 func isActive(l map[string]string) bool {
@@ -72,6 +76,12 @@ func newSnapshot(sel labels.Selector, nodes []corev1.Node, cns []ciliumv2.Cilium
 		n.exists = true
 		n.candidate = sel.Matches(labels.Set(node.Labels))
 		n.nodeLabel = isActive(node.Labels)
+		for _, a := range node.Status.Addresses {
+			if ip, err := netip.ParseAddr(a.Address); err == nil && a.Type == corev1.NodeInternalIP && ip.Is4() {
+				n.ip = ip
+				break
+			}
+		}
 		n.readyReason, n.readyMsg = "NodeReadyUnknown", "Ready condition not reported"
 		for _, c := range node.Status.Conditions {
 			if c.Type == corev1.NodeReady {
@@ -150,9 +160,9 @@ func (s *snapshot) failure(name string) (reason, msg string, failed bool) {
 	case !n.ready:
 		return v1alpha1.ReasonFailover, fmt.Sprintf("%s NotReady (%s)", name, n.readyReason), true
 	}
-	if s.reachable != nil {
-		if ok, msg := s.reachable(name); !ok {
-			return v1alpha1.ReasonFailover, fmt.Sprintf("%s: %s", name, msg), true
+	if s.probe != nil {
+		if r, ok := s.probe(name); ok && r.Failed() {
+			return v1alpha1.ReasonFailover, fmt.Sprintf("%s: %s", name, r.Message()), true
 		}
 	}
 	return "", "", false
@@ -180,12 +190,50 @@ func (s *snapshot) unavailable(name string) string {
 	if !n.agentReady {
 		why = append(why, "egressgateway-ha agent not ready")
 	}
-	if s.reachable != nil {
-		if ok, msg := s.reachable(name); !ok {
-			why = append(why, msg)
+	if s.probe != nil {
+		switch r, ok := s.probe(name); {
+		case !n.ip.IsValid():
+			why = append(why, "no IPv4 InternalIP to probe")
+		case !ok || !r.Probed:
+			why = append(why, "TCP probe not finished yet")
+		case !r.Reachable():
+			why = append(why, r.Message())
 		}
 	}
 	return strings.Join(why, ", ")
+}
+
+// probeTargets returns the InternalIPs of the candidate nodes and of active.
+func (s *snapshot) probeTargets(active string) map[string]netip.Addr {
+	out := map[string]netip.Addr{}
+	for name, n := range s.nodes {
+		if n.exists && n.ip.IsValid() && (n.candidate || name == active) {
+			out[name] = n.ip
+		}
+	}
+	return out
+}
+
+// candidateNames returns the sorted names of the candidate nodes.
+func (s *snapshot) candidateNames() []string {
+	var out []string
+	for name, n := range s.nodes {
+		if n.exists && n.candidate {
+			out = append(out, name)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// otherReachable reports whether a candidate other than name passed its last TCP probe.
+func (s *snapshot) otherReachable(name string) bool {
+	for _, c := range s.candidateNames() {
+		if r, ok := s.probe(c); c != name && ok && r.Reachable() {
+			return true
+		}
+	}
+	return false
 }
 
 // available returns the sorted names of nodes that can become the active node.

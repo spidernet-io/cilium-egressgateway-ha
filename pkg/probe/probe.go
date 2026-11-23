@@ -73,14 +73,15 @@ type Result struct {
 	ConsecutiveFailures int
 	LastError           string
 	LastProbeTime       time.Time
-	threshold           int
+	// Threshold is the number of consecutive failures that marks the target failed.
+	Threshold int
 }
 
 // Reachable is true when the last probe succeeded.
 func (r Result) Reachable() bool { return r.Probed && r.ConsecutiveFailures == 0 }
 
 // Failed is true when the failure threshold is reached.
-func (r Result) Failed() bool { return r.ConsecutiveFailures >= r.threshold }
+func (r Result) Failed() bool { return r.ConsecutiveFailures >= r.Threshold }
 
 func (r Result) Message() string {
 	switch {
@@ -89,7 +90,7 @@ func (r Result) Message() string {
 	case r.ConsecutiveFailures == 0:
 		return fmt.Sprintf("probe to %s succeeded", r.Addr)
 	default:
-		return fmt.Sprintf("%d/%d probes to %s failed: %s", r.ConsecutiveFailures, r.threshold, r.Addr, r.LastError)
+		return fmt.Sprintf("%d/%d probes to %s failed: %s", r.ConsecutiveFailures, r.Threshold, r.Addr, r.LastError)
 	}
 }
 
@@ -137,7 +138,7 @@ func (p *Prober) SetTargets(ips map[string]netip.Addr) {
 		}
 		ctx, cancel := context.WithCancel(context.Background())
 		t := &target{addr: p.addr(ip), cancel: cancel, done: make(chan struct{})}
-		t.result = Result{Addr: t.addr, threshold: p.cfg.FailureThreshold}
+		t.result = Result{Addr: t.addr, Threshold: p.cfg.FailureThreshold}
 		p.targets[name] = t
 		go p.run(ctx, name, t)
 	}

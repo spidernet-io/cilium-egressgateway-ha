@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/netip"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +23,7 @@ import (
 
 	"github.com/spidernet-io/cilium-egressgateway-ha/api/v1alpha1"
 	"github.com/spidernet-io/cilium-egressgateway-ha/pkg/k8s"
+	"github.com/spidernet-io/cilium-egressgateway-ha/pkg/probe"
 )
 
 const (
@@ -33,7 +36,7 @@ type fakeStatus struct {
 	applies int
 }
 
-func (s *fakeStatus) Apply(ctx context.Context, conds []metav1.Condition) error {
+func (s *fakeStatus) Apply(ctx context.Context, conds []metav1.Condition, candidates []v1alpha1.CandidateStatus) error {
 	s.applies++
 	egw := &v1alpha1.EgressGatewayHA{}
 	if err := s.c.Get(ctx, client.ObjectKey{Name: v1alpha1.SingletonName}, egw); err != nil {
@@ -43,6 +46,7 @@ func (s *fakeStatus) Apply(ctx context.Context, conds []metav1.Condition) error 
 		meta.RemoveStatusCondition(&egw.Status.Conditions, t)
 	}
 	egw.Status.Conditions = append(egw.Status.Conditions, conds...)
+	egw.Status.Candidates = candidates
 	return s.c.Status().Update(ctx, egw)
 }
 
@@ -64,7 +68,7 @@ func objects(nodes ...testNode) []client.Object {
 		}
 		return corev1.ConditionFalse
 	}
-	for _, n := range nodes {
+	for i, n := range nodes {
 		l := map[string]string{}
 		if n.candidate {
 			l["candidate"] = "true"
@@ -75,6 +79,7 @@ func objects(nodes ...testNode) []client.Object {
 		}
 		objs = append(objs,
 			&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: n.name, Labels: l}, Status: corev1.NodeStatus{
+				Addresses:  []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: fmt.Sprintf("10.0.0.%d", i+1)}},
 				Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: cond(n.ready), Reason: reason}}}},
 			&ciliumv2.CiliumNode{ObjectMeta: metav1.ObjectMeta{Name: n.name}},
 			&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "cilium-" + n.name, Namespace: ciliumNS, Labels: map[string]string{"k8s-app": "cilium"}},
@@ -568,21 +573,6 @@ func TestCreateDefault(t *testing.T) {
 	}
 }
 
-func TestReachability(t *testing.T) {
-	e := steadyEnv(t, "n1", healthy("n1"), healthy("n2"))
-	e.r.Reachable = func(name string) (bool, string) {
-		if name == "n1" {
-			return false, "3/3 probes to 10.0.0.1:10250 failed: i/o timeout"
-		}
-		return true, ""
-	}
-	e.reconcile()
-	e.expect("n2", "n1")
-	if sw := e.switchRecord(); sw.Message != "n1: 3/3 probes to 10.0.0.1:10250 failed: i/o timeout" {
-		t.Fatalf("switch record = %+v", sw)
-	}
-}
-
 func TestReadsEGWHAAndLabelsWithoutCache(t *testing.T) {
 	e := steadyEnv(t, "n1", healthy("n1"), healthy("n2"))
 	// The cached client must not be used to read EgressGatewayHA or the active labels.
@@ -608,4 +598,124 @@ func TestReadsEGWHAAndLabelsWithoutCache(t *testing.T) {
 	e.setNodeReady("n1", false)
 	e.reconcile()
 	e.expect("n2", "n1")
+}
+
+// fakeProber reports every target as reachable unless a result is set.
+type fakeProber struct {
+	targets map[string]netip.Addr
+	results map[string]probe.Result
+}
+
+func (f *fakeProber) SetTargets(t map[string]netip.Addr) { f.targets = t }
+
+func (f *fakeProber) Get(name string) (probe.Result, bool) {
+	ip, ok := f.targets[name]
+	if !ok {
+		return probe.Result{}, false
+	}
+	if r, ok := f.results[name]; ok {
+		r.Addr = ip.String() + ":10250"
+		return r, true
+	}
+	return probe.Result{Addr: ip.String() + ":10250", Probed: true, Threshold: 3}, true
+}
+
+func (f *fakeProber) fail(name string, failures int) {
+	f.results[name] = probe.Result{Probed: true, ConsecutiveFailures: failures, Threshold: 3, LastError: "i/o timeout"}
+}
+
+// probeEnv returns a steady environment on active with all probes succeeding.
+func probeEnv(t *testing.T, active string, nodes ...testNode) (*env, *fakeProber) {
+	t.Helper()
+	e := newEnv(t, newEGWHA(active), nodes...)
+	p := &fakeProber{results: map[string]probe.Result{}}
+	e.r.Prober = p
+	e.labelNode(active)
+	e.agentReports(active, true, v1alpha1.ReasonEgressIPsConfigured, "configured")
+	e.reconcile()
+	e.expect(active, active)
+	e.expectCond(v1alpha1.ConditionReady, metav1.ConditionTrue, v1alpha1.ReasonAsExpected, "")
+	e.events()
+	return e, p
+}
+
+func TestProbeTargetsAndCandidatesStatus(t *testing.T) {
+	e, p := probeEnv(t, "n1", healthy("n1"), healthy("n2"), testNode{"n3", false, true, true, true})
+	if len(p.targets) != 2 || p.targets["n1"].String() != "10.0.0.1" || p.targets["n2"].String() != "10.0.0.2" {
+		t.Fatalf("targets = %v, want the candidates n1 and n2", p.targets)
+	}
+	e.expectCond(v1alpha1.ConditionActiveNodeReachable, metav1.ConditionTrue, v1alpha1.ReasonProbeSucceeded, "probe to 10.0.0.1:10250 succeeded")
+
+	p.fail("n2", 1)
+	e.reconcile()
+	want := []v1alpha1.CandidateStatus{{Name: "n1", Reachable: true}, {Name: "n2", Reachable: false}}
+	if got := e.egw().Status.Candidates; !slices.Equal(got, want) {
+		t.Fatalf("status.candidates = %v, want %v", got, want)
+	}
+}
+
+func TestProbeFailover(t *testing.T) {
+	e, p := probeEnv(t, "n1", healthy("n1"), healthy("n2"), healthy("n3"))
+
+	// Below the threshold: no switch, the condition stays True with the count.
+	p.fail("n1", 2)
+	e.reconcile()
+	e.expect("n1", "n1")
+	e.expectCond(v1alpha1.ConditionActiveNodeReachable, metav1.ConditionTrue, v1alpha1.ReasonProbeSucceeded,
+		"2/3 probes to 10.0.0.1:10250 failed: i/o timeout")
+
+	// The new active node must pass its last probe: n2 is skipped.
+	p.fail("n2", 1)
+	p.fail("n1", 3)
+	e.reconcile()
+	e.expect("n3", "n1")
+	if sw := e.switchRecord(); sw == nil || sw.Reason != v1alpha1.ReasonFailover ||
+		sw.Message != "n1: 3/3 probes to 10.0.0.1:10250 failed: i/o timeout" {
+		t.Fatalf("switch record = %+v", sw)
+	}
+	e.agentReports("n3", true, v1alpha1.ReasonEgressIPsConfigured, "configured")
+	e.reconcile()
+	e.expect("n3", "n3")
+	e.expectCond(v1alpha1.ConditionActiveNodeElected, metav1.ConditionTrue, v1alpha1.ReasonFailover,
+		"n3 became active node, failover from n1: n1: 3/3 probes")
+	e.expectCond(v1alpha1.ConditionActiveNodeReachable, metav1.ConditionTrue, v1alpha1.ReasonProbeSucceeded, "10.0.0.3:10250")
+}
+
+func TestAllCandidatesUnreachableDoesNotSwitch(t *testing.T) {
+	e, p := probeEnv(t, "n1", healthy("n1"), healthy("n2"))
+	p.fail("n1", 3)
+	p.fail("n2", 3)
+	e.reconcile()
+	e.expect("n1", "n1")
+	e.expectCond(v1alpha1.ConditionActiveNodeReachable, metav1.ConditionFalse, v1alpha1.ReasonProbeFailed, "3/3 probes to 10.0.0.1:10250 failed")
+	e.expectCond(v1alpha1.ConditionSwitching, metav1.ConditionTrue, v1alpha1.ReasonNoAvailableCandidate,
+		"no other candidate is reachable from the controller either")
+	e.expectCond(v1alpha1.ConditionReady, metav1.ConditionFalse, v1alpha1.ConditionSwitching, "")
+	if ev := e.events(); !strings.Contains(ev, "Warning NoAvailableCandidate") {
+		t.Errorf("events = %q", ev)
+	}
+
+	// Another candidate reachable but not usable: a plain NoAvailableCandidate.
+	p.fail("n2", 0)
+	e.setPodReady(agentNS, "agent-n2", false)
+	e.reconcile()
+	e.expectCond(v1alpha1.ConditionSwitching, metav1.ConditionTrue, v1alpha1.ReasonNoAvailableCandidate,
+		"and no other available candidate")
+}
+
+func TestUnprobedActiveKeepsReachableCondition(t *testing.T) {
+	e, _ := probeEnv(t, "n1", healthy("n1"), healthy("n2"))
+	before := e.cond(v1alpha1.ConditionActiveNodeReachable)
+	// A restarted controller has no probe result yet.
+	e.r.Prober = &fakeProber{results: map[string]probe.Result{"n1": {}, "n2": {}}}
+	applies := e.status.applies
+	e.reconcile()
+	if c := e.cond(v1alpha1.ConditionActiveNodeReachable); c.Status != before.Status || c.Message != before.Message {
+		t.Fatalf("ActiveNodeReachable = %+v, want unchanged %+v", c, before)
+	}
+	e.expect("n1", "n1")
+	if e.status.applies != applies+1 {
+		// Only status.candidates changes (both unprobed, so unreachable).
+		t.Fatalf("applies = %d, want %d", e.status.applies, applies+1)
+	}
 }

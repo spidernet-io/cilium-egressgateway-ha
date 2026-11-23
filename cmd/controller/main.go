@@ -18,6 +18,7 @@ import (
 	"github.com/spidernet-io/cilium-egressgateway-ha/api/v1alpha1"
 	"github.com/spidernet-io/cilium-egressgateway-ha/pkg/controller"
 	"github.com/spidernet-io/cilium-egressgateway-ha/pkg/k8s"
+	"github.com/spidernet-io/cilium-egressgateway-ha/pkg/probe"
 )
 
 func main() {
@@ -29,7 +30,12 @@ func main() {
 		leaderElect                    bool
 		leaderElectionNS, leaderElecID string
 	)
+	probeCfg := probe.DefaultConfig()
 	podNS := os.Getenv("POD_NAMESPACE")
+	flag.IntVar(&probeCfg.Port, "probe-port", probeCfg.Port, "TCP port probed on the InternalIP of candidate nodes")
+	flag.DurationVar(&probeCfg.Timeout, "probe-timeout", probeCfg.Timeout, "timeout of one TCP probe")
+	flag.DurationVar(&probeCfg.Interval, "probe-interval", probeCfg.Interval, "wait time after a probe finishes before the next one")
+	flag.IntVar(&probeCfg.FailureThreshold, "probe-failure-threshold", probeCfg.FailureThreshold, "consecutive probe failures that mark a node failed")
 	flag.StringVar(&cfg.CiliumNamespace, "cilium-namespace", "kube-system", "namespace of the cilium-agent pods")
 	flag.StringVar(&ciliumSelector, "cilium-agent-selector", "k8s-app=cilium", "label selector of the cilium-agent pods")
 	flag.StringVar(&cfg.AgentNamespace, "agent-namespace", podNS, "namespace of the agent pods")
@@ -57,6 +63,9 @@ func main() {
 	}
 	if cfg.AgentSelector, err = labels.Parse(agentSelector); err != nil {
 		fail(err, "invalid --agent-selector")
+	}
+	if err := probeCfg.Validate(); err != nil {
+		fail(err, "invalid probe flags")
 	}
 	if cfg.AgentNamespace == "" {
 		fail(nil, "--agent-namespace or POD_NAMESPACE is required")
@@ -99,6 +108,10 @@ func main() {
 		Recorder: mgr.GetEventRecorder("egressgateway-ha-controller"),
 		Config:   cfg,
 	}
+	// Probes only start when the elected replica reconciles and sets the targets.
+	prober := probe.New(probeCfg, nil, func(string) { r.Notify() })
+	defer prober.Stop()
+	r.Prober = prober
 	if err := r.SetupWithManager(mgr); err != nil {
 		fail(err, "unable to set up controller")
 	}
@@ -111,6 +124,8 @@ func main() {
 
 	log.Info("starting controller")
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
-		fail(err, "manager exited")
+		log.Error(err, "manager exited")
+		prober.Stop()
+		os.Exit(1)
 	}
 }

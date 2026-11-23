@@ -159,3 +159,9 @@ func podReady(p *corev1.Pod) bool {
 	}
 	return false
 }
+
+// running reports whether the kind node container is running.
+func running(node string) bool {
+	out, err := command("docker", "inspect", "-f", "{{.State.Running}}", node)
+	return err == nil && out == "true"
+}

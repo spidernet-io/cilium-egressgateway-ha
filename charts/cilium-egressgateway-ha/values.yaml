@@ -35,6 +35,16 @@ controller:
   replicas: 2
   # Interval of the periodic reconcile.
   resyncInterval: 10s
+  # TCP probe of the candidate nodes' InternalIP.
+  nodeProbe:
+    # TCP port; defaults to the kubelet port. A refused connection also counts as alive.
+    port: 10250
+    # Timeout of one connection attempt; the kernel retransmits SYN within it.
+    timeout: 2s
+    # Wait time after a probe finishes before the next one.
+    interval: 5s
+    # Consecutive failures that mark a node failed.
+    failureThreshold: 3
   # Where cilium-agent pods run; their readiness filters new active nodes.
   ciliumNamespace: kube-system
   ciliumAgentSelector: k8s-app=cilium
