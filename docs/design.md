@@ -108,6 +108,8 @@ controller 的工作实例持续检查主网关，满足以下**任意一个**�
 | 故障节点恢复 | 否，不切回 | 不受影响 |
 | 运维修改 `spec.activeNode` | 是 | 短暂中断，已有连接断开 |
 
+以上每一项都在 kind 集群中用 e2e 测试验证过，实测数据见[设计细节](reference/design-details.md)第 7 章。
+
 以下信号**不触发切换**，只记录 Event 和 metrics：
 
 - `NetworkUnavailable` condition：Cilium 只在启动时设置一次，不能反映运行时状态。

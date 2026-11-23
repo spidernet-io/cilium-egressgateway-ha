@@ -28,5 +28,6 @@ KUBECONFIG=<kind kubeconfig> make e2e   # load the image into kind "egw-ha", ins
 
 The e2e tests expect the kind cluster `egw-ha`: candidate nodes labelled
 `egress-gw-candidate=true`, a `client` pod (agnhost) on a non-candidate node and
-an agnhost `netexec` target at `172.18.0.6:8080`. The NotReady failover test
-stops kubelet on a worker for about a minute.
+an agnhost `netexec` target at `172.18.0.6:8080`. The tests are disruptive:
+they kill and restart a worker container, stop kubelet, stop the API server for about a
+minute and partition a worker with iptables. Use a dedicated cluster.

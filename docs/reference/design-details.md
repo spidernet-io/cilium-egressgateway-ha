@@ -377,3 +377,28 @@ MetalLB L2 模式也是"一个 IP 在多个节点之间主备切换"，以下内
 - `NetworkUnavailable` 条件：不能反映运行时故障（见 [Cilium 行为分析](cilium-behavior.md) 第 6 节）。
 - 无状态哈希选主：节点增减会改变排序结果，不满足"不切回"和"升级不切换"的要求。
 - 用户态 ARP 响应：Cilium 要求 egressIP 必须属于节点，不能只响应 ARP。
+
+## 7. 故障场景实测
+
+环境：kind（Kubernetes v1.36.1，Cilium v1.20.5，tunnel/vxlan，KPR），1 个 control-plane 和 2 个 worker 作为候选节点，client Pod 在非候选节点上。默认探测参数（2s、5s、3 次），e2e 中 agent 的 `reconcileInterval` 为 5s。测试代码在 `test/e2e/`。
+
+出口流量的测量方法：client Pod 内运行一个循环，每 200ms 用 `curl -m 1` 访问外部目标，记录 `/proc/uptime` 和目标看到的源 IP，结果写在 Pod 内的文件中，事后读取。这样 API Server 不可用时也能测量。"最长间隔"是两次成功请求（源 IP 为出口 IP）之间的最长时间，正常值约 0.2s。
+
+| 场景 | 操作 | 是否切换 | 出口流量 |
+|---|---|---|---|
+| 主网关宕机 | `docker kill` 主网关 | 是，17.1～21.1s 后写入新的 `spec.activeNode` | 18.9～22.9s 后恢复（4 次测量） |
+| kubelet 停止 | `systemctl stop kubelet` | 是，48～56s 后（Node NotReady） | 切换前不受影响 |
+| kubelet 短暂重启 | `systemctl restart kubelet`，观察 30s | 否 | 0 失败，最长间隔 0.22s |
+| agent 滚动升级 | `kubectl rollout restart ds/egwha-agent` | 否 | 0 失败，最长间隔 0.22s |
+| cilium-agent 重启 | 删除主网关上的 cilium Pod | 否 | 0 失败，最长间隔 0.21s |
+| controller 主副本重启 | 删除持有 Lease 的 Pod | 否，另一个副本接管 | 0 失败，最长间隔 0.21s |
+| API Server 不可用 | 移走 kube-apiserver 的静态 Pod 清单，约 65s | 否 | 0 失败，最长间隔 0.22s |
+| 网络分区 | 主网关上用 iptables 丢弃发往 API Server 的包和 10250 入向连接，ARP 不受影响 | 21s 后开始切换，22s 后停在 `EgressIPConflict`，label 不动 | 分区期间 0 失败 |
+| 分区恢复 | 删除 iptables 规则 | 旧主网关的 agent 约 11s 后删除出口 IP，约 16s 后切换完成 | 切换时 1 次请求失败，最长间隔 1.43s |
+| 故障节点恢复 | `docker start`、`systemctl start kubelet` | 否，不切回 | 不受影响 |
+
+补充说明：
+
+- 网络分区场景在 e2e 中紧接着 API Server 不可用的场景运行。此时 controller 刚刚因为丢失 Lease 重启，重新选主并从头开始探测，所以 e2e 中测到的"分区后到 `EgressIPConflict`"为 46～51s。单独运行时为 22s。
+- 分区期间每秒检查一次，出口 IP 始终只在一个节点上。
+- 分区恢复后，旧主网关的 agent 删除出口 IP 需要约 11s，主要是 client-go 重新建立 watch 的退避时间，加上 `reconcileInterval`。
