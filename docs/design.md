@@ -305,6 +305,7 @@ reason 和 message 的详细说明见[设计细节](reference/design-details.md)
   - 节点本机防火墙的 REJECT 没有问题，因为能回 RST 本身就说明节点还活着。
 - **出口网卡和探测网卡不同**：探测的是 InternalIP 所在的网卡。如果出口 IP 配在另一块网卡上，出口网卡断开时不会触发切换。这种部署需要另外监控出口网卡的链路状态。
 - **新节点的 agent 不可用时无法切换**：所以选择新主网关时会检查 agent Pod 是否 Ready。生产环境建议至少部署 3 个候选节点。
+- **把主网关移出候选节点时，需要有其他可用的候选节点**：DaemonSet 会删除这个节点上的 agent，agent 退出时删除出口 IP。有其他可用节点时，controller 以 `CandidateRemoved` 切换过去；没有可用节点时不切换，`Switching` 的 reason 为 `NoAvailableCandidate`，label 仍然在这个节点上，但出口 IP 已经被删除，上游 ARP 缓存过期后出口流量中断。移出候选节点前，先确认还有其他可用的候选节点。
 - **GitOps**：controller 会修改 `spec.activeNode`。用 ArgoCD、Flux 管理 `EgressGatewayHA` 时，需要忽略这个字段，否则会被改回去，触发一次切换。
 - **GARP**：上游交换机或路由器必须接受 GARP，并及时更新 ARP 表。
 - **外部组件冲突**：节点上的网络管理组件可能会删除出口 IP。agent 会定期 reconcile 恢复，但仍然要避免这类组件管理该网卡。
