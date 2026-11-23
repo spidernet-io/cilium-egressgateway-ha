@@ -35,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/spidernet-io/cilium-egressgateway-ha/api/v1alpha1"
+	"github.com/spidernet-io/cilium-egressgateway-ha/pkg/metrics"
 	"github.com/spidernet-io/cilium-egressgateway-ha/pkg/probe"
 )
 
@@ -87,6 +88,8 @@ type Reconciler struct {
 	Prober Prober
 
 	trigger chan event.GenericEvent
+	// notReady remembers components on the active node already reported not ready.
+	notReady map[string]bool
 }
 
 // Notify triggers a reconcile, e.g. when a probe result changes.
@@ -143,6 +146,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (ctrl.R
 	}
 	runErr := st.run(ctx)
 	st.finishConditions()
+	st.reportComponents()
+	st.updateMetrics()
+	st.notifyPolicies(ctx)
 	if err := st.applyStatus(ctx); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -262,6 +268,7 @@ func (st *state) run(ctx context.Context) error {
 		if err := st.setActive(ctx, active, sw); err != nil {
 			return err
 		}
+		metrics.SwitchesTotal.WithLabelValues(v1alpha1.ReasonManual).Inc()
 		st.event(corev1.EventTypeNormal, "SwitchStarted", fmt.Sprintf("switching %s -> %s (Manual)", orNone(from), active))
 	}
 
@@ -359,6 +366,7 @@ func (st *state) start(ctx context.Context, from, to, reason, msg string) error 
 	if err := st.setActive(ctx, to, sw); err != nil {
 		return err
 	}
+	metrics.SwitchesTotal.WithLabelValues(reason).Inc()
 	st.conds.set(v1alpha1.ConditionSwitching, metav1.ConditionTrue, v1alpha1.ReasonWaitingForGateway,
 		fmt.Sprintf("switching %s -> %s: waiting for egress IPs on %s", orNone(from), to, to))
 	eventType := corev1.EventTypeWarning

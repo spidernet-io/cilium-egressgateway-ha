@@ -1,0 +1,42 @@
+{{- $fullname := include "egwha.fullname" . }}
+{{- range $component := list "controller" "agent" }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-{{ $component }}-metrics
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "egwha.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $component }}
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/instance: {{ $.Release.Name }}
+    app.kubernetes.io/component: {{ $component }}
+  ports:
+  - name: metrics
+    port: {{ index $.Values $component "metricsPort" }}
+    targetPort: metrics
+{{- if $.Values.serviceMonitor.enabled }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ $fullname }}-{{ $component }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "egwha.labels" $ | nindent 4 }}
+    {{- with $.Values.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ $.Release.Name }}
+      app.kubernetes.io/component: {{ $component }}
+  endpoints:
+  - port: metrics
+    interval: {{ $.Values.serviceMonitor.interval }}
+{{- end }}
+{{- end }}

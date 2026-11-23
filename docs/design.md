@@ -292,6 +292,8 @@ default   node1    True        True    3d
 
 reason 和 message 的详细说明见[设计细节](reference/design-details.md)第 1.3 节。
 
+controller 和 agent 还提供 Prometheus metrics，并在 `EgressGatewayHA` 和被管理的 policy 上记录 Event，见[设计细节](reference/design-details.md)第 5.4 节。
+
 ## 7. 限制与风险
 
 - **已有连接会断开**：切换时旧网关上的 SNAT 状态不会迁移，TCP 长连接需要应用重新建立。

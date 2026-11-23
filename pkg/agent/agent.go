@@ -35,6 +35,7 @@ import (
 	"github.com/spidernet-io/cilium-egressgateway-ha/api/v1alpha1"
 	"github.com/spidernet-io/cilium-egressgateway-ha/pkg/iprange"
 	"github.com/spidernet-io/cilium-egressgateway-ha/pkg/k8s"
+	"github.com/spidernet-io/cilium-egressgateway-ha/pkg/metrics"
 	"github.com/spidernet-io/cilium-egressgateway-ha/pkg/netops"
 )
 
@@ -153,7 +154,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (ctrl.R
 	r.synced.Store(true)
 
 	if egw.Spec.ActiveNode != r.Config.NodeName {
-		return r.result(r.releaseAll(ctx))
+		err := r.releaseAll(ctx)
+		r.updateIPMetric()
+		return r.result(err)
 	}
 
 	allowed, err := iprange.Parse(egw.Spec.EgressIPs)
@@ -161,7 +164,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (ctrl.R
 		log.Error(err, "invalid spec.egressIPs, keeping egress IPs unchanged")
 		return r.requeue(), nil
 	}
-	return r.result(r.configure(ctx, egw, desiredIPs(ctx, policies.Items, allowed)))
+	err = r.configure(ctx, egw, desiredIPs(ctx, policies.Items, allowed))
+	r.updateIPMetric()
+	return r.result(err)
 }
 
 // desiredIPs returns the sorted, deduplicated egress IPs of managed policies
@@ -183,6 +188,20 @@ func desiredIPs(ctx context.Context, policies []ciliumv2.CiliumEgressGatewayPoli
 	}
 	slices.SortFunc(out, netip.Addr.Compare)
 	return slices.Compact(out)
+}
+
+// updateIPMetric reports the managed egress IPs currently on the interfaces.
+func (r *Reconciler) updateIPMetric() {
+	all, err := r.Ops.ListAll()
+	if err != nil {
+		return
+	}
+	metrics.AgentEgressIP.Reset()
+	for iface, ips := range all {
+		for _, ip := range ips {
+			metrics.AgentEgressIP.WithLabelValues(iface, ip.String()).Set(1)
+		}
+	}
 }
 
 // releaseAll removes every managed egress IP from every interface.
@@ -247,6 +266,7 @@ func (r *Reconciler) configure(ctx context.Context, egw *v1alpha1.EgressGatewayH
 		}
 		if err := r.Ops.Detect(ctx, iface, ip); err != nil {
 			if c, ok := errors.AsType[*netops.Conflict](err); ok {
+				metrics.AgentConflictsTotal.WithLabelValues(ip.String()).Inc()
 				conflicts = append(conflicts, c.Error()+", not added")
 			} else {
 				failures = append(failures, fmt.Sprintf("%s: %v", ip, err))

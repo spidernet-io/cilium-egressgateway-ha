@@ -17,16 +17,18 @@ import (
 	"github.com/spidernet-io/cilium-egressgateway-ha/api/v1alpha1"
 	"github.com/spidernet-io/cilium-egressgateway-ha/pkg/agent"
 	"github.com/spidernet-io/cilium-egressgateway-ha/pkg/k8s"
+	"github.com/spidernet-io/cilium-egressgateway-ha/pkg/metrics"
 	"github.com/spidernet-io/cilium-egressgateway-ha/pkg/netops"
 )
 
 func main() {
 	cfg := agent.Config{}
-	var probeAddr string
+	var probeAddr, metricsAddr string
 	flag.StringVar(&cfg.NodeName, "node-name", os.Getenv("NODE_NAME"), "name of the local node")
 	flag.DurationVar(&cfg.ReconcileInterval, "reconcile-interval", 10*time.Second, "interval of periodic reconcile")
 	flag.DurationVar(&cfg.GARPInterval, "garp-interval", 0, "interval of periodic gratuitous ARP, 0 to only send it when an egress IP is added")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":9790", "address of the health probe endpoint")
+	flag.StringVar(&metricsAddr, "metrics-bind-address", ":9791", "address of the metrics endpoint, 0 to disable")
 	opts := zap.Options{}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
@@ -40,7 +42,7 @@ func main() {
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 k8s.NewScheme(),
-		Metrics:                metricsserver.Options{BindAddress: "0"},
+		Metrics:                metricsserver.Options{BindAddress: metricsAddr},
 		HealthProbeBindAddress: probeAddr,
 		Cache: cache.Options{ByObject: map[client.Object]cache.ByObject{
 			&v1alpha1.EgressGatewayHA{}: {Field: fields.OneTermEqualSelector("metadata.name", v1alpha1.SingletonName)},
@@ -51,6 +53,7 @@ func main() {
 		os.Exit(1)
 	}
 
+	metrics.RegisterAgent()
 	r := &agent.Reconciler{
 		Client: mgr.GetClient(),
 		Ops:    netops.New(),

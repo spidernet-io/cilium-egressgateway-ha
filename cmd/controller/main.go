@@ -22,6 +22,7 @@ import (
 	"github.com/spidernet-io/cilium-egressgateway-ha/api/v1alpha1"
 	"github.com/spidernet-io/cilium-egressgateway-ha/pkg/controller"
 	"github.com/spidernet-io/cilium-egressgateway-ha/pkg/k8s"
+	"github.com/spidernet-io/cilium-egressgateway-ha/pkg/metrics"
 	"github.com/spidernet-io/cilium-egressgateway-ha/pkg/probe"
 	egwwebhook "github.com/spidernet-io/cilium-egressgateway-ha/pkg/webhook"
 )
@@ -139,6 +140,7 @@ func main() {
 		fail(err, "unable to create manager")
 	}
 
+	metrics.RegisterController()
 	r := &controller.Reconciler{
 		Client:   mgr.GetClient(),
 		Reader:   mgr.GetAPIReader(),

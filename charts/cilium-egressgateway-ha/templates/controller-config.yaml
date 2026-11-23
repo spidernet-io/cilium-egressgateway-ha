@@ -12,7 +12,8 @@ data:
       {{- toYaml .Values.egressGatewayHA.candidateNodeSelector | nindent 6 }}
     interface: {{ .Values.egressGatewayHA.interface | quote }}
     egressIPs:
-      {{- required "egressGatewayHA.egressIPs is required" .Values.egressGatewayHA.egressIPs | toYaml | nindent 6 }}
+      {{- if empty .Values.egressGatewayHA.egressIPs }}{{ fail "egressGatewayHA.egressIPs must not be empty" }}{{ end }}
+      {{- toYaml .Values.egressGatewayHA.egressIPs | nindent 6 }}
     {{- with .Values.egressGatewayHA.defaultEgressIP }}
     defaultEgressIP: {{ . | quote }}
     {{- end }}

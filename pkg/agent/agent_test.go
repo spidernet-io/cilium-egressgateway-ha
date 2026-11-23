@@ -12,6 +12,7 @@ import (
 
 	ciliumv2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	slimv1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/meta/v1"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/spidernet-io/cilium-egressgateway-ha/api/v1alpha1"
 	"github.com/spidernet-io/cilium-egressgateway-ha/pkg/k8s"
+	"github.com/spidernet-io/cilium-egressgateway-ha/pkg/metrics"
 	"github.com/spidernet-io/cilium-egressgateway-ha/pkg/netops"
 )
 
@@ -257,11 +259,18 @@ func TestActiveNodeKeepsExistingIPsWithoutDAD(t *testing.T) {
 func TestActiveNodeConflict(t *testing.T) {
 	e := newEnv(t, nil, egwha(node), policy("a", "172.18.0.200", true), policy("b", "172.18.0.201", true))
 	e.ops.conflicts[ip200] = "aa:bb:cc:dd:ee:ff"
+	conflictsBefore := testutil.ToFloat64(metrics.AgentConflictsTotal.WithLabelValues("172.18.0.200"))
 	if err := e.reconcile(t); err != nil {
 		t.Fatal(err)
 	}
 	if !slices.Equal(e.ops.ifaces["eth0"], []netip.Addr{ip201}) {
 		t.Fatalf("eth0 = %v, want only %s", e.ops.ifaces["eth0"], ip201)
+	}
+	if got := testutil.ToFloat64(metrics.AgentConflictsTotal.WithLabelValues("172.18.0.200")) - conflictsBefore; got != 1 {
+		t.Errorf("agent_dad_conflicts_total = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(metrics.AgentEgressIP.WithLabelValues("eth0", "172.18.0.201")); got != 1 {
+		t.Errorf("agent_egress_ip{172.18.0.201} = %v, want 1", got)
 	}
 	s := e.status
 	if s.active.Ready || !slices.Equal(s.active.EgressIPs, []string{"172.18.0.201"}) ||

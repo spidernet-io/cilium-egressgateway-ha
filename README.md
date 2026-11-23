@@ -2,6 +2,20 @@
 
 High availability for the Cilium community Egress Gateway. See the [design doc](docs/design.md).
 
+## Install
+
+```bash
+helm install egwha charts/cilium-egressgateway-ha -n kube-system \
+  --set egressGatewayHA.candidateNodeSelector.matchLabels.node-role\.example\.com/egress=true \
+  --set egressGatewayHA.interface=eth0 \
+  --set 'egressGatewayHA.egressIPs={192.168.10.100-192.168.10.110}'
+kubectl get egressgatewayha
+```
+
+Then create `CiliumEgressGatewayPolicy` objects whose `egressGateway.nodeSelector` is
+`matchLabels: {egress-gw-active: "true"}`. See the [design doc](docs/design.md) for
+the full values and behavior.
+
 ## Development
 
 ```bash

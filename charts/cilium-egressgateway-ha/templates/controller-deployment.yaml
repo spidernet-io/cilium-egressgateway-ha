@@ -19,7 +19,14 @@ spec:
         app.kubernetes.io/component: controller
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/controller-config.yaml") . | sha256sum }}
+        {{- with .Values.controller.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
     spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       serviceAccountName: {{ include "egwha.fullname" . }}-controller
       {{- with .Values.controller.priorityClassName }}
       priorityClassName: {{ . }}

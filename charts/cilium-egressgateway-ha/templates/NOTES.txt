@@ -1,0 +1,23 @@
+cilium-egressgateway-ha is installed in {{ .Release.Namespace }}.
+
+The controller creates EgressGatewayHA "default" from egressGatewayHA values
+only when it does not exist. Later changes must be made on the object itself:
+
+  kubectl get egressgatewayha default
+  kubectl edit egressgatewayha default
+
+Policies are managed when their nodeSelector is exactly:
+
+  egressGateway:
+    nodeSelector:
+      matchLabels:
+        egress-gw-active: "true"
+
+Manual switch:
+
+  kubectl patch egressgatewayha default --type merge -p '{"spec":{"activeNode":"<node>"}}'
+
+Uninstalling keeps the egress IP and the egress-gw-active label on the active
+node, so egress traffic keeps working. Delete EgressGatewayHA "default" and the
+managed policies first if they are no longer needed, then remove the label and
+the egress IP (address label "<interface>:egw") from the node.

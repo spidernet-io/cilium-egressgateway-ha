@@ -11,6 +11,8 @@ import (
 	"time"
 
 	ciliumv2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
+	slimv1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/meta/v1"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -23,6 +25,7 @@ import (
 
 	"github.com/spidernet-io/cilium-egressgateway-ha/api/v1alpha1"
 	"github.com/spidernet-io/cilium-egressgateway-ha/pkg/k8s"
+	"github.com/spidernet-io/cilium-egressgateway-ha/pkg/metrics"
 	"github.com/spidernet-io/cilium-egressgateway-ha/pkg/probe"
 )
 
@@ -717,5 +720,47 @@ func TestUnprobedActiveKeepsReachableCondition(t *testing.T) {
 	if e.status.applies != applies+1 {
 		// Only status.candidates changes (both unprobed, so unreachable).
 		t.Fatalf("applies = %d, want %d", e.status.applies, applies+1)
+	}
+}
+
+func TestMetricsAndComponentEvents(t *testing.T) {
+	before := testutil.ToFloat64(metrics.SwitchesTotal.WithLabelValues(v1alpha1.ReasonFailover))
+	e := steadyEnv(t, "n1", healthy("n1"), healthy("n2"))
+	if got := testutil.ToFloat64(metrics.ActiveNode.WithLabelValues("n1")); got != 1 {
+		t.Errorf("active_node{n1} = %v", got)
+	}
+	if got := testutil.ToFloat64(metrics.Condition.WithLabelValues(v1alpha1.ConditionReady, "True", v1alpha1.ReasonAsExpected)); got != 1 {
+		t.Errorf("condition{Ready,True} = %v", got)
+	}
+
+	// Agent not ready on the active node: one Warning Event, a metric, no switch.
+	e.setPodReady(agentNS, "agent-n1", false)
+	e.reconcile()
+	e.reconcile()
+	e.expect("n1", "n1")
+	if ev := e.events(); strings.Count(ev, "Warning ActiveNodeAgentNotReady") != 1 {
+		t.Errorf("events = %q", ev)
+	}
+	if got := testutil.ToFloat64(metrics.ActiveNodeComponentReady.WithLabelValues("agent")); got != 0 {
+		t.Errorf("active_node_component_ready{agent} = %v", got)
+	}
+	e.setPodReady(agentNS, "agent-n1", true)
+
+	// A failover is counted, and managed policies get a Warning Event once.
+	if err := e.c.Create(context.Background(), &ciliumv2.CiliumEgressGatewayPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "p"},
+		Spec: ciliumv2.CiliumEgressGatewayPolicySpec{EgressGateway: &ciliumv2.EgressGateway{
+			NodeSelector: &slimv1.LabelSelector{MatchLabels: map[string]slimv1.MatchLabelsValue{v1alpha1.ActiveLabelKey: "true"}}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	e.setNodeReady("n1", false)
+	e.reconcile()
+	e.reconcile()
+	if got := testutil.ToFloat64(metrics.SwitchesTotal.WithLabelValues(v1alpha1.ReasonFailover)) - before; got != 1 {
+		t.Errorf("switches_total{Failover} increased by %v, want 1", got)
+	}
+	if ev := e.events(); strings.Count(ev, "Warning EgressGatewayNotReady") != 1 {
+		t.Errorf("policy events = %q", ev)
 	}
 }

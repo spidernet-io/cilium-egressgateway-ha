@@ -294,6 +294,34 @@ admission webhook 有超时限制（默认 10s），只能做静态校验，不�
 | `mutatingwebhookconfigurations` / `validatingwebhookconfigurations` | get, patch（写入 caBundle） | - |
 | `events` | create | - |
 
+### 5.4 metrics 和 Event
+
+controller 的 metrics 在 `controller.metricsPort`（默认 8080），只有工作实例会更新；agent 的 metrics 在 host 网络的 `agent.metricsPort`（默认 9791）。chart 为两者各创建一个 headless Service，`serviceMonitor.enabled=true` 时创建 ServiceMonitor。
+
+| metric | 类型 | 含义 |
+|---|---|---|
+| `egressgateway_ha_switches_total{reason}` | counter | 开始的切换次数，reason 为 `Initial`、`Failover`、`Manual`、`CandidateRemoved` |
+| `egressgateway_ha_active_node{node}` | gauge | `spec.activeNode` 对应的节点为 1 |
+| `egressgateway_ha_condition{type,status,reason}` | gauge | 每个 condition 当前的 status 和 reason 为 1，例如告警 `Switching` 的 `NoAvailableCandidate`、`GatewayReady` 的 `EgressIPConflict` |
+| `egressgateway_ha_candidate_reachable{node}` | gauge | 候选节点最近一次 TCP 探测成功为 1 |
+| `egressgateway_ha_candidate_available{node}` | gauge | 候选节点可以成为主网关为 1 |
+| `egressgateway_ha_active_node_component_ready{component}` | gauge | 主网关上的 `agent`、`cilium-agent` 就绪为 1，不触发切换 |
+| `egressgateway_ha_agent_egress_ip{interface,ip}` | gauge | 本节点网卡上被管理的出口 IP |
+| `egressgateway_ha_agent_dad_conflicts_total{ip}` | counter | 重复地址检测发现冲突的次数 |
+
+Event：
+
+- `EgressGatewayHA` 上：`SwitchStarted`、`SwitchCompleted`、`TargetUnavailable`、`NoAvailableCandidate`；主网关上的 agent 或 cilium-agent 变为未就绪时，记录一次 `ActiveNodeAgentNotReady`、`ActiveNodeCiliumAgentNotReady`（Warning）。
+- 被管理的 policy 上：`Ready` 变为 False，或者 False 的 reason 变化时，在每个被管理的 policy 上记录一次 Warning Event `EgressGatewayNotReady`，note 中写明 `Ready` 的 reason 和 message。用户查看自己的 policy 时就能看到出口 IP 冲突、没有可用的主网关等问题。
+
+### 5.5 卸载
+
+`helm uninstall` 只删除 controller、agent 和 webhook，不影响出口流量：
+
+- agent 退出时节点仍然是候选节点，所以保留出口 IP；`egress-gw-active` label 也留在主网关上。
+- `EgressGatewayHA default`、证书 Secret、Lease 由 controller 创建，CRD 在 chart 的 `crds/` 目录中，都不会被删除。重新安装时沿用已有的 `EgressGatewayHA`。
+- 彻底清理时，先删除被管理的 policy 和 `EgressGatewayHA default`，再删除主网关上的 label 和地址 label 为 `<网卡>:egw` 的出口 IP。
+
 ## 6. 方案选择
 
 ### 6.1 为什么由集中的 controller 决定主备
