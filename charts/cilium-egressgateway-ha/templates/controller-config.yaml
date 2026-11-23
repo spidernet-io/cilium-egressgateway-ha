@@ -9,7 +9,16 @@ data:
   # Used only to create EgressGatewayHA "default" when it does not exist.
   default-spec.yaml: |
     candidateNodeSelector:
-      {{- toYaml .Values.egressGatewayHA.candidateNodeSelector | nindent 6 }}
+      {{- with .Values.egressGatewayHA.candidateNodeSelector.matchLabels }}
+      matchLabels:
+        {{- range $k, $v := . }}
+        {{ $k | quote }}: {{ $v | toString | quote }}
+        {{- end }}
+      {{- end }}
+      {{- with .Values.egressGatewayHA.candidateNodeSelector.matchExpressions }}
+      matchExpressions:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
     interface: {{ .Values.egressGatewayHA.interface | quote }}
     egressIPs:
       {{- if empty .Values.egressGatewayHA.egressIPs }}{{ fail "egressGatewayHA.egressIPs must not be empty" }}{{ end }}
