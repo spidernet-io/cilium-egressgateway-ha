@@ -22,12 +22,25 @@ the full values and behavior.
 make generate   # regenerate deepcopy and CRD (charts/cilium-egressgateway-ha/crds)
 make build
 make test       # unit tests; netops tests need root and run in an isolated netns
-make image      # build binaries and the controller and agent images
-KUBECONFIG=<kind kubeconfig> make e2e   # load the image into kind "egw-ha", install the chart (controller + agent), run test/e2e
+make image      # build the controller and agent images
 ```
 
-The e2e tests expect the kind cluster `egw-ha`: candidate nodes labelled
-`egress-gw-candidate=true`, a `client` pod (agnhost) on a non-candidate node and
-an agnhost `netexec` target at `172.18.0.6:8080`. The tests are disruptive:
-they kill and restart a worker container, stop kubelet, stop the API server for about a
-minute and partition a worker with iptables. Use a dedicated cluster.
+### E2E tests
+
+The e2e tests are [Ginkgo](https://onsi.github.io/ginkgo/) suites under `test/e2e`, one
+directory per area: `crd`, `webhook`, `switchover`, `failover` and `reliability`. They run on
+every pull request in GitHub Actions, and locally with docker, kind and helm:
+
+```bash
+make e2e          # all of the steps below
+make e2e-cluster  # kind cluster "egw-e2e" on its own docker network, latest Cilium, client pod and target
+make e2e-deploy   # build the images of the current tree, load them into kind and install the chart
+make e2e-test     # run the suites with ginkgo, e.g. E2E_LABEL='!disruptive'
+make e2e-logs     # collect logs into .e2e/logs
+make e2e-clean    # delete the cluster
+```
+
+Cilium uses the latest chart version unless `CILIUM_VERSION` is set. The `failover` and
+`reliability` suites are labelled `disruptive`: they kill and restart a node container,
+stop kubelet, stop the API server for about a minute and partition a node with iptables.
+kind may need `fs.inotify.max_user_instances=512` on the host.

@@ -1,0 +1,16 @@
+# Egress traffic source; pinned to a node that is never an egress node.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: client
+  namespace: default
+  labels:
+    app: client
+spec:
+  nodeName: @NODE@
+  terminationGracePeriodSeconds: 1
+  containers:
+  - name: client
+    image: @AGNHOST_IMAGE@
+    imagePullPolicy: IfNotPresent
+    args: ["pause"]

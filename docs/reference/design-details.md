@@ -383,7 +383,7 @@ MetalLB L2 模式也是"一个 IP 在多个节点之间主备切换"，以下内
 
 ## 7. 故障场景实测
 
-环境：kind（Kubernetes v1.36.1，Cilium v1.20.5，tunnel/vxlan，KPR），1 个 control-plane 和 2 个 worker 作为候选节点，client Pod 在非候选节点上。默认探测参数（2s、5s、3 次），e2e 中 agent 的 `reconcileInterval` 为 5s。测试代码在 `test/e2e/`。
+环境：kind（Kubernetes v1.36.1，Cilium v1.20.5，tunnel/vxlan，KPR），1 个 control-plane 和 2 个 worker 作为候选节点，client Pod 在非候选节点上。默认探测参数（2s、5s、3 次），e2e 中 agent 的 `reconcileInterval` 为 5s。测试代码在 `test/e2e/`，是按类别划分的 Ginkgo suite，每个 PR 都会在 GitHub Actions 中运行（见 README）。
 
 出口流量的测量方法：client Pod 内运行一个循环，每 200ms 用 `curl -m 1` 访问外部目标，记录 `/proc/uptime` 和目标看到的源 IP，结果写在 Pod 内的文件中，事后读取。这样 API Server 不可用时也能测量。"最长间隔"是两次成功请求（源 IP 为出口 IP）之间的最长时间，正常值约 0.2s。
 

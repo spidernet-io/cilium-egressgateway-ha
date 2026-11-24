@@ -9,9 +9,13 @@ REGISTRY ?= ghcr.io
 REPOSITORY ?= spidernet-io/cilium-egressgateway-ha
 COMPONENTS := controller agent
 TAG ?= dev
-KIND_CLUSTER ?= egw-ha
-NAMESPACE ?= kube-system
-E2E_VALUES ?= test/e2e/values.yaml
+E2E_KIND_CLUSTER ?= egw-e2e
+E2E_DIR ?= $(CURDIR)/.e2e
+E2E_KUBECONFIG ?= $(E2E_DIR)/kubeconfig
+E2E_ENV_FILE ?= $(E2E_DIR)/env
+# Ginkgo label filter, e.g. E2E_LABEL='!disruptive'.
+E2E_LABEL ?=
+E2E_TIMEOUT ?= 90m
 
 .PHONY: all
 all: generate build test
@@ -49,22 +53,40 @@ test:
 
 .PHONY: lint-chart
 lint-chart:
-	$(HELM) lint $(CHART) -f $(E2E_VALUES)
+	$(HELM) lint $(CHART) --set global.egressNodeSelector.matchLabels.a=b --set 'egressGatewayHA.egressIPs={192.0.2.1}'
 
-# Builds the image, loads it into the kind cluster and installs the chart.
-.PHONY: kind-deploy
-kind-deploy: image
-	# helm install/upgrade never updates CRDs under crds/.
-	$(KUBECTL) apply --server-side --force-conflicts -f $(CHART)/crds
-	$(KIND) load docker-image --name $(KIND_CLUSTER) $(foreach c,$(COMPONENTS),$(REGISTRY)/$(REPOSITORY)/$(c):$(TAG))
-	$(HELM) upgrade --install egwha $(CHART) -n $(NAMESPACE) -f $(E2E_VALUES) \
-		$(foreach c,$(COMPONENTS),--set $(c).image.registry=$(REGISTRY) --set $(c).image.repository=$(REPOSITORY)/$(c) \
-		--set $(c).image.tag=$(TAG) --set $(c).image.pullPolicy=Never)
-	$(KUBECTL) -n $(NAMESPACE) rollout restart ds/egwha-agent deploy/egwha-controller
-	$(KUBECTL) -n $(NAMESPACE) rollout status ds/egwha-agent --timeout=120s
-	$(KUBECTL) -n $(NAMESPACE) rollout status deploy/egwha-controller --timeout=120s
+export E2E_KIND_CLUSTER E2E_KUBECONFIG E2E_ENV_FILE
 
-# Runs against the kind cluster in $KUBECONFIG, e.g. KUBECONFIG=$(kind get kubeconfig --name egw-ha).
+# Creates the kind cluster with Cilium and prepares the test environment.
+.PHONY: e2e-cluster
+e2e-cluster:
+	mkdir -p $(E2E_DIR)
+	test/scripts/setup-cluster.sh
+	test/scripts/setup-testenv.sh
+
+# Builds the images of the current tree and installs the chart.
+.PHONY: e2e-deploy
+e2e-deploy: image
+	REGISTRY=$(REGISTRY) REPOSITORY=$(REPOSITORY) TAG=$(TAG) test/scripts/install.sh
+
+# Runs every suite under test/e2e in order. The suites are disruptive.
+.PHONY: e2e-test
+e2e-test:
+	set -a; . $(E2E_ENV_FILE); set +a; \
+	go tool ginkgo -r --tags e2e -v --keep-going --timeout $(E2E_TIMEOUT) \
+		--label-filter '$(E2E_LABEL)' --junit-report junit.xml --output-dir $(E2E_DIR)/report \
+		test/e2e
+
 .PHONY: e2e
-e2e: kind-deploy
-	go test -tags e2e -count=1 -v -timeout 20m ./test/e2e/...
+e2e: e2e-cluster e2e-deploy e2e-test
+
+.PHONY: e2e-logs
+e2e-logs:
+	OUTPUT_DIR=$(E2E_DIR)/logs test/scripts/collect-logs.sh
+
+.PHONY: e2e-clean
+e2e-clean:
+	-$(KIND) delete cluster --name $(E2E_KIND_CLUSTER)
+	-docker rm -f $(E2E_KIND_CLUSTER)-target
+	-docker network rm $(E2E_KIND_CLUSTER)
+	rm -rf $(E2E_DIR)

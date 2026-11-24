@@ -1,3 +1,4 @@
+# Helm values for the e2e tests; egressGatewayHA.egressIPs is set by install.sh.
 global:
   egressNodeSelector:
     matchLabels:
@@ -7,7 +8,8 @@ agent:
   reconcileInterval: 5s
   logLevel: debug
 
+controller:
+  logLevel: debug
+
 egressGatewayHA:
   interface: eth0
-  egressIPs:
-  - 172.18.0.200-172.18.0.210
