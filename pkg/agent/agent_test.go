@@ -117,10 +117,10 @@ func egwha(active string) *v1alpha1.EgressGatewayHA {
 	return &v1alpha1.EgressGatewayHA{
 		ObjectMeta: metav1.ObjectMeta{Name: v1alpha1.SingletonName, Generation: 1},
 		Spec: v1alpha1.EgressGatewayHASpec{
-			CandidateNodeSelector: metav1.LabelSelector{MatchLabels: map[string]string{"candidate": "true"}},
-			Interface:             "eth0",
-			EgressIPs:             []string{"172.18.0.200-172.18.0.210"},
-			ActiveNode:            active,
+			EgressNodeSelector: metav1.LabelSelector{MatchLabels: map[string]string{"candidate": "true"}},
+			Interface:          "eth0",
+			EgressIPs:          []string{"172.18.0.200-172.18.0.210"},
+			ActiveNode:         active,
 		},
 	}
 }
@@ -377,9 +377,9 @@ func TestPeriodicGARP(t *testing.T) {
 
 func TestCleanupOnExit(t *testing.T) {
 	notCandidate := egwha("node2")
-	notCandidate.Spec.CandidateNodeSelector.MatchLabels = map[string]string{"candidate": "no"}
+	notCandidate.Spec.EgressNodeSelector.MatchLabels = map[string]string{"candidate": "no"}
 	activeNotCandidate := egwha(node)
-	activeNotCandidate.Spec.CandidateNodeSelector.MatchLabels = map[string]string{"candidate": "no"}
+	activeNotCandidate.Spec.EgressNodeSelector.MatchLabels = map[string]string{"candidate": "no"}
 	for name, tc := range map[string]struct {
 		egw     *v1alpha1.EgressGatewayHA
 		funcs   *interceptor.Funcs

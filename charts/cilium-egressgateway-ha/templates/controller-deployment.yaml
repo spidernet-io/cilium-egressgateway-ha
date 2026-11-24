@@ -23,7 +23,7 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
     spec:
-      {{- with .Values.imagePullSecrets }}
+      {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
@@ -51,26 +51,34 @@ spec:
                   app.kubernetes.io/component: controller
       containers:
       - name: controller
-        image: {{ include "egwha.image" . }}
-        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        image: {{ include "egwha.image" (dict "root" . "image" .Values.controller.image) }}
+        imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
         command: ["/usr/local/bin/controller"]
         args:
         - --default-spec=/etc/egressgateway-ha/default-spec.yaml
         - --resync-interval={{ .Values.controller.resyncInterval }}
-        - --probe-port={{ .Values.controller.nodeProbe.port }}
-        - --probe-timeout={{ .Values.controller.nodeProbe.timeout }}
-        - --probe-interval={{ .Values.controller.nodeProbe.interval }}
-        - --probe-failure-threshold={{ .Values.controller.nodeProbe.failureThreshold }}
-        - --cilium-namespace={{ .Values.controller.ciliumNamespace }}
-        - --cilium-agent-selector={{ .Values.controller.ciliumAgentSelector }}
+        {{- with .Values.controller.egressNodeProbe }}
+        - --egress-node-probe={{ .enabled }}
+        - --egress-node-probe-port={{ .port }}
+        - --egress-node-probe-timeout={{ .timeout }}
+        - --egress-node-probe-interval={{ .interval }}
+        - --egress-node-probe-failure-threshold={{ .failureThreshold }}
+        {{- end }}
+        {{- with .Values.controller.ciliumAgentCheck }}
+        - --cilium-agent-check={{ .enabled }}
+        - --cilium-namespace={{ .namespace }}
+        - --cilium-agent-selector={{ .selector }}
+        {{- end }}
         - --agent-selector=app.kubernetes.io/instance={{ .Release.Name }},app.kubernetes.io/component=agent
         - --health-probe-bind-address=:{{ .Values.controller.healthPort }}
         - --metrics-bind-address=:{{ .Values.controller.metricsPort }}
         - --zap-log-level={{ .Values.controller.logLevel }}
-        - --webhook-port={{ .Values.webhook.port }}
+        - --webhook-port={{ .Values.controller.webhookPort }}
         - --webhook-service={{ include "egwha.fullname" . }}-webhook
         - --webhook-secret={{ include "egwha.fullname" . }}-webhook-cert
+        {{- if .Values.ciliumEgressPolicyWebhook.enabled }}
         - --mutating-webhook-configuration={{ include "egwha.fullname" . }}-webhook
+        {{- end }}
         - --validating-webhook-configuration={{ include "egwha.fullname" . }}-webhook
         env:
         - name: POD_NAMESPACE
@@ -79,7 +87,7 @@ spec:
               fieldPath: metadata.namespace
         ports:
         - name: webhook
-          containerPort: {{ .Values.webhook.port }}
+          containerPort: {{ .Values.controller.webhookPort }}
         - name: metrics
           containerPort: {{ .Values.controller.metricsPort }}
         - name: health

@@ -40,6 +40,8 @@ func (n *nodeInfo) labelled() bool { return n.nodeLabel || n.ciliumNodeLabel }
 // snapshot is the cluster state used by one reconcile.
 type snapshot struct {
 	nodes map[string]*nodeInfo
+	// ciliumAgentCheck requires a ready cilium-agent on a new active node.
+	ciliumAgentCheck bool
 	// probe returns the TCP probe result of a node; nil treats every node as reachable.
 	probe func(name string) (probe.Result, bool)
 }
@@ -156,7 +158,7 @@ func (s *snapshot) failure(name string) (reason, msg string, failed bool) {
 	case !n.exists:
 		return v1alpha1.ReasonFailover, fmt.Sprintf("%s: node not found", name), true
 	case !n.candidate:
-		return v1alpha1.ReasonCandidateRemoved, fmt.Sprintf("%s no longer matches candidateNodeSelector", name), true
+		return v1alpha1.ReasonCandidateRemoved, fmt.Sprintf("%s no longer matches egressNodeSelector", name), true
 	case !n.ready:
 		return v1alpha1.ReasonFailover, fmt.Sprintf("%s NotReady (%s)", name, n.readyReason), true
 	}
@@ -176,7 +178,7 @@ func (s *snapshot) unavailable(name string) string {
 	case !n.exists:
 		return "node not found"
 	case !n.candidate:
-		return "does not match candidateNodeSelector"
+		return "does not match egressNodeSelector"
 	}
 	if !n.ready {
 		why = append(why, "node NotReady")
@@ -184,7 +186,7 @@ func (s *snapshot) unavailable(name string) string {
 	if !n.hasCiliumNode {
 		why = append(why, "CiliumNode not found")
 	}
-	if !n.ciliumReady {
+	if s.ciliumAgentCheck && !n.ciliumReady {
 		why = append(why, "cilium-agent not ready")
 	}
 	if !n.agentReady {

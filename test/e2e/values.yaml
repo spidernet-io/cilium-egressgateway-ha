@@ -1,11 +1,13 @@
-egressGatewayHA:
-  candidateNodeSelector:
+global:
+  egressNodeSelector:
     matchLabels:
       egress-gw-candidate: "true"
-  interface: eth0
-  egressIPs:
-  - 172.18.0.200-172.18.0.210
 
 agent:
   reconcileInterval: 5s
   logLevel: debug
+
+egressGatewayHA:
+  interface: eth0
+  egressIPs:
+  - 172.18.0.200-172.18.0.210

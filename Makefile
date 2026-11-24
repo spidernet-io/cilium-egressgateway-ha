@@ -5,7 +5,9 @@ KIND ?= kind
 
 CHART := charts/cilium-egressgateway-ha
 ARCH ?= amd64
-IMAGE ?= ghcr.io/spidernet-io/cilium-egressgateway-ha
+REGISTRY ?= ghcr.io
+REPOSITORY ?= spidernet-io/cilium-egressgateway-ha
+COMPONENTS := controller agent
 TAG ?= dev
 KIND_CLUSTER ?= egw-ha
 NAMESPACE ?= kube-system
@@ -27,9 +29,13 @@ build:
 bin:
 	CGO_ENABLED=0 GOOS=linux GOARCH=$(ARCH) go build -o bin/linux_$(ARCH)/ ./cmd/...
 
+# Builds $(REGISTRY)/$(REPOSITORY)/controller:$(TAG) and .../agent:$(TAG).
 .PHONY: image
 image: bin
-	docker build --build-arg TARGETARCH=$(ARCH) -t $(IMAGE):$(TAG) .
+	for c in $(COMPONENTS); do \
+		docker build --build-arg TARGETARCH=$(ARCH) --build-arg COMPONENT=$$c \
+			-t $(REGISTRY)/$(REPOSITORY)/$$c:$(TAG) . || exit 1; \
+	done
 
 .PHONY: vet
 vet:
@@ -48,9 +54,12 @@ lint-chart:
 # Builds the image, loads it into the kind cluster and installs the chart.
 .PHONY: kind-deploy
 kind-deploy: image
-	$(KIND) load docker-image --name $(KIND_CLUSTER) $(IMAGE):$(TAG)
+	# helm install/upgrade never updates CRDs under crds/.
+	$(KUBECTL) apply --server-side --force-conflicts -f $(CHART)/crds
+	$(KIND) load docker-image --name $(KIND_CLUSTER) $(foreach c,$(COMPONENTS),$(REGISTRY)/$(REPOSITORY)/$(c):$(TAG))
 	$(HELM) upgrade --install egwha $(CHART) -n $(NAMESPACE) -f $(E2E_VALUES) \
-		--set image.repository=$(IMAGE) --set image.tag=$(TAG) --set image.pullPolicy=Never
+		$(foreach c,$(COMPONENTS),--set $(c).image.registry=$(REGISTRY) --set $(c).image.repository=$(REPOSITORY)/$(c) \
+		--set $(c).image.tag=$(TAG) --set $(c).image.pullPolicy=Never)
 	$(KUBECTL) -n $(NAMESPACE) rollout restart ds/egwha-agent deploy/egwha-controller
 	$(KUBECTL) -n $(NAMESPACE) rollout status ds/egwha-agent --timeout=120s
 	$(KUBECTL) -n $(NAMESPACE) rollout status deploy/egwha-controller --timeout=120s

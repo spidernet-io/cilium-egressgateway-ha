@@ -48,9 +48,9 @@ const (
 
 // EgressGatewayHASpec defines the desired state of EgressGatewayHA.
 type EgressGatewayHASpec struct {
-	// CandidateNodeSelector selects the nodes that may become the active gateway.
+	// EgressNodeSelector selects the nodes that may become the active gateway.
 	// +required
-	CandidateNodeSelector metav1.LabelSelector `json:"candidateNodeSelector"`
+	EgressNodeSelector metav1.LabelSelector `json:"egressNodeSelector"`
 
 	// Interface is the network interface the agent configures egress IPs on.
 	// +required

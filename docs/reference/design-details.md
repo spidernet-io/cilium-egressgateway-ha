@@ -14,7 +14,7 @@ kind: EgressGatewayHA
 metadata:
   name: default                     # 全局只有一个实例，名字固定为 default
 spec:
-  candidateNodeSelector:            # 候选网关节点
+  egressNodeSelector:               # 出口节点，即候选网关节点
     matchLabels:
       node-role.example.com/egress: "true"
   interface: eth0                   # agent 把出口 IP 配到这块网卡上。不会写入 policy
@@ -43,10 +43,10 @@ status:
 
 ### 1.2 spec 的创建方式
 
-- Helm values 中的 `egressGatewayHA` 部分（`candidateNodeSelector`、`interface`、`egressIPs`、`defaultEgressIP`）渲染成 controller 的配置。
+- Helm values 中的 `global.egressNodeSelector`，以及 `egressGatewayHA` 部分（`interface`、`egressIPs`、`defaultEgressIP`），渲染成 controller 的配置。
 - controller 启动时，如果 `EgressGatewayHA default` 不存在，就按这份配置创建它，`spec.activeNode` 留空。
 - **CR 已经存在时，controller 不会用 Helm 配置覆盖它。** 之后以 CR 为准，运维直接修改 CR 即可调整配置。`helm upgrade` 修改这些 value 不会生效。
-- agent DaemonSet 的 nodeAffinity 由同一个 Helm value 渲染。如果运维之后只修改了 CR 中的 `candidateNodeSelector`，两者会不一致，见 5.2。
+- agent DaemonSet 的 nodeAffinity 由同一个 Helm value `global.egressNodeSelector` 渲染。如果运维之后只修改了 CR 中的 `egressNodeSelector`，两者会不一致，见 5.2。
 
 ### 1.3 conditions
 
@@ -84,9 +84,11 @@ status:
 
 ### 2.1 TCP 探测
 
-controller 向节点的 InternalIP 发起 TCP 连接，目标端口为 `nodeProbe.port`（默认 10250，kubelet 端口），超时 `nodeProbe.timeout`（默认 2s）。controller 对所有候选节点都执行探测，结果写入 `status.candidates[].reachable`。
+controller 向节点的 InternalIP 发起 TCP 连接，目标端口为 `egressNodeProbe.port`（默认 10250，kubelet 端口），超时 `egressNodeProbe.timeout`（默认 2s）。controller 对所有候选节点都执行探测，结果写入 `status.candidates[].reachable`。
 
-探测是**串行**的：上一次探测结束（成功、被拒绝或超时）后，等待 `nodeProbe.interval`（默认 5s）再发起下一次。所以同一个节点不会同时有两个探测，timeout 也可以大于 interval。
+TCP 探测可以用 `controller.egressNodeProbe.enabled` 关闭，影响见[设计文档](../design.md) 4.1 节。关闭后 controller 不再探测，`status.candidates` 和 `ActiveNodeReachable` condition 也会从 status 中删除。
+
+探测是**串行**的：上一次探测结束（成功、被拒绝或超时）后，等待 `egressNodeProbe.interval`（默认 5s）再发起下一次。所以同一个节点不会同时有两个探测，timeout 也可以大于 interval。
 
 节点宕机时的检测时间：
 
@@ -189,7 +191,7 @@ agent 持续 watch `EgressGatewayHA` 和被管理的 policy，并每 `reconcileI
 ### 3.3 退出（SIGTERM）
 
 - **不删除出口 IP**，也不修改任何 label。Pod 升级、驱逐期间，出口 IP 和 Cilium 的 BPF 配置保持不变，出口流量不受影响。新 Pod 启动后按 3.1 沿用已有 IP。
-- 例外：如果本节点已经不匹配 `candidateNodeSelector`（节点退出候选），就删除出口 IP。DaemonSet 在节点不再匹配时会删除 agent Pod，所以这种情况会走到这里。即使本节点仍然是 `spec.activeNode` 也删除：controller 会因为 `CandidateRemoved` 把主网关切走，而这个节点上已经没有 agent，留下的出口 IP 会让新主网关的重复地址检测一直失败。
+- 例外：如果本节点已经不匹配 `egressNodeSelector`（节点退出候选），就删除出口 IP。DaemonSet 在节点不再匹配时会删除 agent Pod，所以这种情况会走到这里。即使本节点仍然是 `spec.activeNode` 也删除：controller 会因为 `CandidateRemoved` 把主网关切走，而这个节点上已经没有 agent，留下的出口 IP 会让新主网关的重复地址检测一直失败。
 
 ## 4. Webhook
 
@@ -241,7 +243,7 @@ controller 的两个副本都提供 webhook 服务，不依赖工作实例。
 
 - 名字必须是 `default`（CRD schema 中的 CEL 规则，不依赖 webhook）。
 - `egressIPs` 中每一项都是合法的 IPv4 地址或地址范围（`起始IP-结束IP`）。`defaultEgressIP` 如果填写，必须在 `egressIPs` 中。
-- `spec.activeNode` 非空并且被修改时，节点必须存在，并且匹配 `candidateNodeSelector`。只在修改时检查，这样主网关的 Node 被删除后，运维仍然可以修改其他字段。
+- `spec.activeNode` 非空并且被修改时，节点必须存在，并且匹配 `egressNodeSelector`。只在修改时检查，这样主网关的 Node 被删除后，运维仍然可以修改其他字段。
 - **controller 自己的修改不经过这个 webhook**：webhook 配置中用 `matchConditions` 排除 controller 的 ServiceAccount（`request.userInfo.username != 'system:serviceaccount:<namespace>:<controller SA>'`），API Server 不会调用 webhook。原因有两个：一是故障切换时 controller 要写 `spec.activeNode`，不能依赖 webhook 是否可用；二是 controller 回滚手动切换时，原来的节点可能已经不是候选节点，不能被拒绝。controller 写入的节点由它自己的选择规则保证。
 - 修改 `egressIPs` 时，如果已有被管理的 policy 使用的 egressIP 不在新的列表中，拒绝修改。
 
@@ -270,11 +272,12 @@ admission webhook 有超时限制（默认 10s），只能做静态校验，不�
 - Deployment，2 副本，调度到 master 节点（容忍 control-plane taint），副本之间用 Lease 选出工作实例。
 - 不需要额外的 capability：TCP 探测使用普通 socket。
 - 提供 webhook Service。
+- controller 和 agent 使用各自的镜像：`ghcr.io/spidernet-io/cilium-egressgateway-ha/controller` 和 `.../agent`。
 
 ### 5.2 agent
 
 - DaemonSet，`hostNetwork: true`。调度范围通过 nodeAffinity 限制在候选节点上。
-- Helm 用同一个 value 渲染 DaemonSet 的 nodeAffinity，以及 controller 创建 `EgressGatewayHA` 时使用的 `candidateNodeSelector`，所以初次部署时两者一致。CR 创建后，如果运维只修改了 CR 中的 `candidateNodeSelector`，两者会不一致：匹配 selector 但没有 agent Pod 的节点会被视为不可用，不会被选为主网关；有 agent Pod 但不匹配 selector 的节点不会成为候选节点。修改候选节点时，需要同时修改 CR 和 Helm value。
+- Helm 用同一个 value `global.egressNodeSelector` 渲染 DaemonSet 的 nodeAffinity，以及 controller 创建 `EgressGatewayHA` 时使用的 `egressNodeSelector`，所以初次部署时两者一致。CR 创建后，如果运维只修改了 CR 中的 `egressNodeSelector`，两者会不一致：匹配 selector 但没有 agent Pod 的节点会被视为不可用，不会被选为主网关；有 agent Pod 但不匹配 selector 的节点不会成为候选节点。修改候选节点时，需要同时修改 CR 和 Helm value。
 - capabilities：`NET_ADMIN`（增删 IP）、`NET_RAW`（发送 GARP、重复地址检测）。
 - `updateStrategy` 使用 `maxSurge: 0`，避免同一节点上同时有两个 agent。
 - readinessProbe：agent 连接上 API Server 并完成首次同步后才 Ready。健康检查端口使用 host 网络上的 `agent.healthPort`（默认 9790，避开 cilium-agent 占用的 9890）。controller 用 agent Pod 的 Ready 状态判断节点能否作为新主网关，不需要单独的心跳。
@@ -286,7 +289,7 @@ admission webhook 有超时限制（默认 10s），只能做静态校验，不�
 | `coordination.k8s.io/leases`（本命名空间） | get, create, update（选工作实例） | - |
 | `egressgateway-ha.spidernet.io/egressgatewayhas` | get, list, watch, create（初次部署时创建）, update（写入 `spec.activeNode`） | get, list, watch |
 | `egressgateway-ha.spidernet.io/egressgatewayhas/status` | patch（Server-Side Apply） | patch（Server-Side Apply，只写 `status.activeNode` 和 `GatewayReady` condition） |
-| `nodes` | get, list, watch, patch | get（判断本节点是否仍匹配 `candidateNodeSelector`） |
+| `nodes` | get, list, watch, patch | get（判断本节点是否仍匹配 `egressNodeSelector`） |
 | `cilium.io/ciliumnodes` | get, list, watch, patch | get, patch（只更新本节点的 annotation） |
 | `cilium.io/ciliumegressgatewaypolicies` | get, list, watch | get, list, watch |
 | `pods`（cilium 和本项目的命名空间） | get, list, watch（判断 cilium-agent 和 agent 是否 Ready） | - |
@@ -344,7 +347,7 @@ Event：
 | 故障检测 | 需要备节点自己判断。如果监听 Node Ready，默认至少要 40s | controller 用 TCP 连接探测节点，约 16～21s；Node NotReady 也触发切换 |
 | 误判时是否双主 | **会。** 备节点加上出口 IP 后，旧主节点并不知道自己已被替换，还继续持有 IP，流量全部中断 | 新主节点添加 IP 前先做重复地址检测，发现冲突就不添加，也不修改 label |
 | 多个备节点之间的互斥 | 需要另外加一把锁 | 只有一个 controller 实例做决定 |
-| 故障节点恢复后 | 候选 label 已经被删除，需要运维手动加回 | 候选节点由 `candidateNodeSelector` 决定，节点恢复后自动成为备节点 |
+| 故障节点恢复后 | 候选 label 已经被删除，需要运维手动加回 | 候选节点由 `egressNodeSelector` 决定，节点恢复后自动成为备节点 |
 | 是否强制切回 | **会。** 候选 label 加回后，原主节点名字排序最靠前，Cilium 立即切回，但出口 IP 还在备节点上，流量中断 | 不会。只有 `activeNode` 节点带有 active label |
 
 ### 6.3 为什么不在每个节点上预先配置出口 IP

@@ -26,9 +26,9 @@ func egwha(mutate func(*v1alpha1.EgressGatewayHASpec)) *v1alpha1.EgressGatewayHA
 	obj := &v1alpha1.EgressGatewayHA{
 		ObjectMeta: metav1.ObjectMeta{Name: v1alpha1.SingletonName},
 		Spec: v1alpha1.EgressGatewayHASpec{
-			CandidateNodeSelector: metav1.LabelSelector{MatchLabels: map[string]string{"candidate": "true"}},
-			Interface:             "eth0",
-			EgressIPs:             []string{"10.0.0.100-10.0.0.110", "10.0.0.5"},
+			EgressNodeSelector: metav1.LabelSelector{MatchLabels: map[string]string{"candidate": "true"}},
+			Interface:          "eth0",
+			EgressIPs:          []string{"10.0.0.100-10.0.0.110", "10.0.0.5"},
 		},
 	}
 	if mutate != nil {
@@ -202,7 +202,7 @@ func TestValidateEGWHA(t *testing.T) {
 		"active candidate":   {obj: set(func(s *v1alpha1.EgressGatewayHASpec) { s.ActiveNode = "n1" })},
 		"active not found":   {obj: set(func(s *v1alpha1.EgressGatewayHASpec) { s.ActiveNode = "n9" }), denied: "node n9 not found"},
 		"active not candidate": {old: set(func(s *v1alpha1.EgressGatewayHASpec) { s.ActiveNode = "n1" }),
-			obj: set(func(s *v1alpha1.EgressGatewayHASpec) { s.ActiveNode = "n2" }), denied: "node n2 does not match spec.candidateNodeSelector"},
+			obj: set(func(s *v1alpha1.EgressGatewayHASpec) { s.ActiveNode = "n2" }), denied: "node n2 does not match spec.egressNodeSelector"},
 		"unchanged deleted active node": {old: set(func(s *v1alpha1.EgressGatewayHASpec) { s.ActiveNode = "n9" }),
 			obj: set(func(s *v1alpha1.EgressGatewayHASpec) { s.ActiveNode = "n9"; s.Interface = "eth1" })},
 		"remove used IP": {old: set(nil), obj: set(func(s *v1alpha1.EgressGatewayHASpec) { s.EgressIPs = []string{"10.0.0.102-10.0.0.110"} }),

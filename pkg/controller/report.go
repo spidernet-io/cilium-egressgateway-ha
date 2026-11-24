@@ -24,13 +24,15 @@ func (st *state) reportComponents() {
 		st.r.notReady = map[string]bool{}
 	}
 	n := st.snap.node(active)
-	for _, c := range []struct {
+	type component struct {
 		name, reason string
 		ready        bool
-	}{
-		{"agent", "ActiveNodeAgentNotReady", n.agentReady},
-		{"cilium-agent", "ActiveNodeCiliumAgentNotReady", n.ciliumReady},
-	} {
+	}
+	components := []component{{"agent", "ActiveNodeAgentNotReady", n.agentReady}}
+	if st.snap.ciliumAgentCheck {
+		components = append(components, component{"cilium-agent", "ActiveNodeCiliumAgentNotReady", n.ciliumReady})
+	}
+	for _, c := range components {
 		key := active + "/" + c.name
 		if active == "" || !n.exists || c.ready {
 			delete(st.r.notReady, key)
@@ -76,7 +78,9 @@ func (st *state) updateMetrics() {
 	if active != "" {
 		n := st.snap.node(active)
 		metrics.ActiveNodeComponentReady.WithLabelValues("agent").Set(metrics.Bool(n.agentReady))
-		metrics.ActiveNodeComponentReady.WithLabelValues("cilium-agent").Set(metrics.Bool(n.ciliumReady))
+		if st.snap.ciliumAgentCheck {
+			metrics.ActiveNodeComponentReady.WithLabelValues("cilium-agent").Set(metrics.Bool(n.ciliumReady))
+		}
 	}
 }
 

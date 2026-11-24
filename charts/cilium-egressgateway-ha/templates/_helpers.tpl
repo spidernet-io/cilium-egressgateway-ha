@@ -9,15 +9,19 @@ app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end -}}
 
+{{/* Image of a component: include "egwha.image" (dict "root" $ "image" .Values.controller.image) */}}
 {{- define "egwha.image" -}}
-{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}
+{{- $img := .image -}}
+{{- $registry := .root.Values.global.imageRegistryOverride | default $img.registry -}}
+{{- if $registry -}}{{ $registry }}/{{- end -}}{{ $img.repository }}
+{{- if $img.digest -}}@{{ $img.digest }}{{- else -}}:{{ $img.tag | default .root.Chart.AppVersion }}{{- end -}}
 {{- end -}}
 
-{{/* Renders egressGatewayHA.candidateNodeSelector as node affinity match expressions. */}}
-{{- define "egwha.candidateMatchExpressions" -}}
-{{- $sel := .Values.egressGatewayHA.candidateNodeSelector -}}
+{{/* Renders global.egressNodeSelector as node affinity match expressions. */}}
+{{- define "egwha.egressNodeMatchExpressions" -}}
+{{- $sel := .Values.global.egressNodeSelector -}}
 {{- if and (empty $sel.matchLabels) (empty $sel.matchExpressions) -}}
-{{- fail "egressGatewayHA.candidateNodeSelector must not be empty" -}}
+{{- fail "global.egressNodeSelector must not be empty" -}}
 {{- end -}}
 {{- range $k, $v := $sel.matchLabels }}
 - key: {{ $k }}

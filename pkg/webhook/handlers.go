@@ -201,9 +201,9 @@ func (h *Handlers) ValidateEGWHA(ctx context.Context, req admission.Request) adm
 			errs = append(errs, fmt.Sprintf("spec.defaultEgressIP %s is not in spec.egressIPs", spec.DefaultEgressIP))
 		}
 	}
-	sel, err := metav1.LabelSelectorAsSelector(&spec.CandidateNodeSelector)
+	sel, err := metav1.LabelSelectorAsSelector(&spec.EgressNodeSelector)
 	if err != nil {
-		errs = append(errs, fmt.Sprintf("spec.candidateNodeSelector: %v", err))
+		errs = append(errs, fmt.Sprintf("spec.egressNodeSelector: %v", err))
 	}
 
 	// Only a changed activeNode is checked, so other edits still work after the
@@ -215,7 +215,7 @@ func (h *Handlers) ValidateEGWHA(ctx context.Context, req admission.Request) adm
 		} else if err != nil {
 			return admission.Errored(http.StatusInternalServerError, err)
 		} else if !sel.Matches(labels.Set(n.Labels)) {
-			errs = append(errs, fmt.Sprintf("spec.activeNode: node %s does not match spec.candidateNodeSelector", spec.ActiveNode))
+			errs = append(errs, fmt.Sprintf("spec.activeNode: node %s does not match spec.egressNodeSelector", spec.ActiveNode))
 		}
 	}
 

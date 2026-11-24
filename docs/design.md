@@ -81,7 +81,7 @@ controller 的工作实例持续检查主网关，满足以下**任意一个**�
 | TCP 探测连续 3 次失败 | 节点宕机、网络不可达 | 约 16～21s |
 | Node 的 Ready condition 为 `False` 或 `Unknown` | kubelet 故障、节点和 API Server 断开 | 约 40～50s |
 
-另外两种情况也会切换：主网关不再匹配 `candidateNodeSelector`；运维修改了 `spec.activeNode`。
+另外两种情况也会切换：主网关不再匹配 `egressNodeSelector`；运维修改了 `spec.activeNode`。
 
 ### 3.1 TCP 探测规则
 
@@ -121,7 +121,19 @@ controller 的工作实例持续检查主网关，满足以下**任意一个**�
 
 ### 4.1 选择新主网关
 
-可用的候选节点必须满足：匹配 `candidateNodeSelector`、TCP 探测成功、Node Ready、cilium-agent Ready、agent Pod Ready。后两个条件用来避开"切过去也无法转发"的节点：没有 agent，就没有人配置出口 IP；没有 cilium-agent，就不会下发 SNAT 配置。
+可用的候选节点必须匹配 `egressNodeSelector`，并满足以下条件。条件分为基础条件和可选条件，各自对"触发切换"和"选择新主网关"的作用不同：
+
+| 条件 | 层级 | 触发切换 | 选择新主网关 |
+|---|---|---|---|
+| Node Ready | 基础，始终开启 | 是，NotReady 时切走 | 要求 Ready |
+| agent Pod Ready | 基础，始终开启 | 否，agent 重启或升级时出口 IP 保留 | 要求 Ready，没有 agent 就没有人配置出口 IP |
+| TCP 探测 | 可选，`controller.egressNodeProbe.enabled` | 是，连续失败达到阈值时切走 | 要求最近一次探测成功 |
+| cilium-agent Pod Ready | 可选，`controller.ciliumAgentCheck.enabled` | 否，cilium-agent 重启时 BPF map 保留 | 要求 Ready，没有 cilium-agent 就不会下发 SNAT 配置 |
+
+两个可选条件默认开启。关闭后：
+
+- 关闭 TCP 探测：节点网络故障不再触发切换，选择新主网关时也不考虑节点网络。节点整体断网时，Node 仍然会在约 40～50s 后变为 NotReady 并触发切换；只有 kubelet 和 API Server 之间通畅、但节点网络有故障时，完全检测不到。
+- 关闭 cilium-agent 检查：只影响选择新主网关，可能选中 cilium-agent 不可用的节点，出口流量会持续中断，直到它恢复。
 
 | 触发原因 | 选择规则 |
 |---|---|
@@ -249,29 +261,50 @@ webhook 的完整规则见[设计细节](reference/design-details.md)第 4 章�
 
 ### 6.2 Helm values
 
+主要配置如下，完整配置见 `charts/cilium-egressgateway-ha/values.yaml`：
+
 ```yaml
-egressGatewayHA:                    # controller 创建 EgressGatewayHA default 时使用，只在 CR 不存在时生效
-  candidateNodeSelector:
+global:
+  egressNodeSelector:               # 出口节点：agent DaemonSet 的调度范围，以及创建 CR 时的 spec.egressNodeSelector
     matchLabels:
       node-role.example.com/egress: "true"
+  imageRegistryOverride: ""         # 替换所有镜像的 registry，用于离线环境
+
+controller:
+  image:
+    registry: ghcr.io
+    repository: spidernet-io/cilium-egressgateway-ha/controller
+  egressNodeProbe:
+    enabled: true                   # TCP 探测，见 4.1
+    port: 10250                     # 探测节点上的 TCP 端口，默认是 kubelet 端口
+    timeout: 2s                     # 单次 TCP 连接超时，期间内核会自动重传 SYN
+    interval: 5s                    # 上一次探测结束后，等待多久发起下一次
+    failureThreshold: 3             # 连续失败多少次后判定节点故障
+  ciliumAgentCheck:
+    enabled: true                   # 选择新主网关时要求 cilium-agent Ready，见 4.1
+    namespace: kube-system
+    selector: k8s-app=cilium
+
+agent:
+  image:
+    registry: ghcr.io
+    repository: spidernet-io/cilium-egressgateway-ha/agent
+  garpInterval: 0s                  # 周期性发送 GARP 的间隔，0 表示只在添加出口 IP 时发送
+  reconcileInterval: 10s            # agent 定期 reconcile 的间隔
+
+egressGatewayHA:                    # controller 创建 EgressGatewayHA default 时使用，只在 CR 不存在时生效
   interface: eth0
   egressIPs:                        # 支持单个 IP 和地址范围
   - 192.168.10.100-192.168.10.110
   defaultEgressIP: ""               # 为空时取 egressIPs 中的第一个
 
-controller:
-  nodeProbe:
-    port: 10250                     # 探测节点上的 TCP 端口，默认是 kubelet 端口
-    timeout: 2s                     # 单次 TCP 连接超时，期间内核会自动重传 SYN
-    interval: 5s                    # 上一次探测结束后，等待多久发起下一次
-    failureThreshold: 3             # 连续失败多少次后判定节点故障
-
-agent:
-  garpInterval: 0s                  # 周期性发送 GARP 的间隔，0 表示只在添加出口 IP 时发送
-  reconcileInterval: 10s            # agent 定期 reconcile 的间隔
+ciliumEgressPolicyWebhook:
+  enabled: true                     # policy 的补全和校验，见 6.1
 ```
 
-`egressGatewayHA` 部分只在初次部署时使用。CR 创建后，修改配置需要直接修改 CR，`helm upgrade` 不会覆盖它。修改候选节点时，需要同时修改 CR 和 Helm value，因为 agent DaemonSet 的调度范围由 Helm value 决定。
+- `egressGatewayHA` 部分只在初次部署时使用。CR 创建后，修改配置需要直接修改 CR，`helm upgrade` 不会覆盖它。
+- `global.egressNodeSelector` 有两个用途：每次 `helm upgrade` 都会更新 agent DaemonSet 的调度范围；只在 CR 不存在时写入 `spec.egressNodeSelector`。所以修改出口节点时，需要同时修改 CR 和这个 Helm value。
+- 关闭 `ciliumEgressPolicyWebhook` 后，policy 不再被补全和校验：未填写 egressIP 的 policy 会让 Cilium 改用默认路由网卡的 IP。`EgressGatewayHA` 的校验始终开启。
 
 ### 6.3 查看状态
 
@@ -304,7 +337,7 @@ controller 和 agent 还提供 Prometheus metrics，并在 `EgressGatewayHA` 和
 - **重复地址检测的局限**：旧节点仍然回应 ARP，但已经无法转发，并且它的 agent 也无法访问 API Server 时，切换会一直停在第一阶段，出口中断，需要人工处理。
 - **只有一个观察点**：探测只从 controller 所在节点发起。如果只是 controller 到主网关这一条路径故障，会尝试切换，但重复地址检测会阻止新节点添加出口 IP，流量继续走旧节点。
 - **探测端口的防火墙**：
-  - 中间防火墙对 `nodeProbe.port` 直接丢包时，探测会超时，节点会被误判为故障。
+  - 中间防火墙对 `egressNodeProbe.port` 直接丢包时，探测会超时，节点会被误判为故障。这种环境可以修改 `egressNodeProbe.port`，或者关闭 TCP 探测（见 4.1）。
   - 中间防火墙代替节点回 RST 时，节点宕机后探测仍然被判定为存活，故障检测不到。
   - 节点本机防火墙的 REJECT 没有问题，因为能回 RST 本身就说明节点还活着。
 - **出口网卡和探测网卡不同**：探测的是 InternalIP 所在的网卡。如果出口 IP 配在另一块网卡上，出口网卡断开时不会触发切换。这种部署需要另外监控出口网卡的链路状态。

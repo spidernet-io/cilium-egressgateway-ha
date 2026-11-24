@@ -6,7 +6,7 @@ High availability for the Cilium community Egress Gateway. See the [design doc](
 
 ```bash
 helm install egwha charts/cilium-egressgateway-ha -n kube-system \
-  --set egressGatewayHA.candidateNodeSelector.matchLabels.node-role\.example\.com/egress=true \
+  --set global.egressNodeSelector.matchLabels.node-role\.example\.com/egress=true \
   --set egressGatewayHA.interface=eth0 \
   --set 'egressGatewayHA.egressIPs={192.168.10.100-192.168.10.110}'
 kubectl get egressgatewayha
@@ -22,7 +22,7 @@ the full values and behavior.
 make generate   # regenerate deepcopy and CRD (charts/cilium-egressgateway-ha/crds)
 make build
 make test       # unit tests; netops tests need root and run in an isolated netns
-make image      # build binaries and the image
+make image      # build binaries and the controller and agent images
 KUBECONFIG=<kind kubeconfig> make e2e   # load the image into kind "egw-ha", install the chart (controller + agent), run test/e2e
 ```
 

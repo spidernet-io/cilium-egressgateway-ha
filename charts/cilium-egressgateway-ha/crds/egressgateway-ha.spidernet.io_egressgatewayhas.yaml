@@ -60,8 +60,22 @@ spec:
                   ActiveNode is the current active gateway node. It is set by the controller,
                   and changing it triggers a manual switchover.
                 type: string
-              candidateNodeSelector:
-                description: CandidateNodeSelector selects the nodes that may become
+              defaultEgressIP:
+                description: |-
+                  DefaultEgressIP is used for managed policies that do not set an egressIP.
+                  Defaults to the first IP of EgressIPs.
+                type: string
+              egressIPs:
+                description: |-
+                  EgressIPs lists the allowed egress IPs. Each item is an IPv4 address or
+                  an inclusive range in the form "start-end".
+                items:
+                  type: string
+                minItems: 1
+                type: array
+                x-kubernetes-list-type: atomic
+              egressNodeSelector:
+                description: EgressNodeSelector selects the nodes that may become
                   the active gateway.
                 properties:
                   matchExpressions:
@@ -107,20 +121,6 @@ spec:
                     type: object
                 type: object
                 x-kubernetes-map-type: atomic
-              defaultEgressIP:
-                description: |-
-                  DefaultEgressIP is used for managed policies that do not set an egressIP.
-                  Defaults to the first IP of EgressIPs.
-                type: string
-              egressIPs:
-                description: |-
-                  EgressIPs lists the allowed egress IPs. Each item is an IPv4 address or
-                  an inclusive range in the form "start-end".
-                items:
-                  type: string
-                minItems: 1
-                type: array
-                x-kubernetes-list-type: atomic
               interface:
                 description: Interface is the network interface the agent configures
                   egress IPs on.
@@ -128,8 +128,8 @@ spec:
                 minLength: 1
                 type: string
             required:
-            - candidateNodeSelector
             - egressIPs
+            - egressNodeSelector
             - interface
             type: object
           status:

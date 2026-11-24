@@ -18,7 +18,7 @@ func sampleEGWHA(name string) *v1alpha1.EgressGatewayHA {
 	return &v1alpha1.EgressGatewayHA{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
 		Spec: v1alpha1.EgressGatewayHASpec{
-			CandidateNodeSelector: metav1.LabelSelector{MatchLabels: map[string]string{"egress-gw-candidate": "true"}},
+			EgressNodeSelector: metav1.LabelSelector{MatchLabels: map[string]string{"egress-gw-candidate": "true"}},
 			Interface:             "eth0",
 			EgressIPs:             []string{"172.18.0.200-172.18.0.210"},
 		},

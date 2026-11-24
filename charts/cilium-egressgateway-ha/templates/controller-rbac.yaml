@@ -51,7 +51,10 @@ subjects:
 - kind: ServiceAccount
   name: {{ include "egwha.fullname" . }}-controller
   namespace: {{ .Release.Namespace }}
-{{- $pods := list .Values.controller.ciliumNamespace .Release.Namespace | uniq }}
+{{- $pods := list .Release.Namespace }}
+{{- if .Values.controller.ciliumAgentCheck.enabled }}
+{{- $pods = append $pods .Values.controller.ciliumAgentCheck.namespace | uniq }}
+{{- end }}
 {{- range $ns := $pods }}
 ---
 # Read cilium-agent and agent pods to filter new active nodes.

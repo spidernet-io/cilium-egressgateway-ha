@@ -246,7 +246,7 @@ func TestController(t *testing.T) {
 
 	t.Run("manual switch to a non-candidate is rejected by the webhook", func(t *testing.T) {
 		err := patchActiveNode(c, worker3)
-		if err == nil || !strings.Contains(err.Error(), "node "+worker3+" does not match spec.candidateNodeSelector") {
+		if err == nil || !strings.Contains(err.Error(), "node "+worker3+" does not match spec.egressNodeSelector") {
 			t.Fatalf("want webhook denial, got %v", err)
 		}
 		waitSteady(t, c, active)
@@ -283,7 +283,7 @@ func TestController(t *testing.T) {
 		}
 		removed := active
 		active = waitSteady(t, c, next)
-		expectElected(t, c, v1alpha1.ReasonCandidateRemoved, removed+" no longer matches candidateNodeSelector")
+		expectElected(t, c, v1alpha1.ReasonCandidateRemoved, removed+" no longer matches egressNodeSelector")
 		waitSourceIP(t, egressIP)
 		kubectl(t, "label", "node", removed, candidateKey+"=true")
 		waitUsable(t, c, removed)

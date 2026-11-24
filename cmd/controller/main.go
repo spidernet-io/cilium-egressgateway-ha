@@ -37,15 +37,18 @@ func main() {
 		leaderElectionNS, leaderElecID string
 	)
 	var (
-		webhookPort int
-		certCfg     egwwebhook.CertConfig
+		webhookPort  int
+		certCfg      egwwebhook.CertConfig
+		probeEnabled bool
 	)
 	probeCfg := probe.DefaultConfig()
 	podNS := os.Getenv("POD_NAMESPACE")
-	flag.IntVar(&probeCfg.Port, "probe-port", probeCfg.Port, "TCP port probed on the InternalIP of candidate nodes")
-	flag.DurationVar(&probeCfg.Timeout, "probe-timeout", probeCfg.Timeout, "timeout of one TCP probe")
-	flag.DurationVar(&probeCfg.Interval, "probe-interval", probeCfg.Interval, "wait time after a probe finishes before the next one")
-	flag.IntVar(&probeCfg.FailureThreshold, "probe-failure-threshold", probeCfg.FailureThreshold, "consecutive probe failures that mark a node failed")
+	flag.BoolVar(&probeEnabled, "egress-node-probe", true, "TCP probe egress nodes: switch on probe failures and require a passed probe for a new active node")
+	flag.IntVar(&probeCfg.Port, "egress-node-probe-port", probeCfg.Port, "TCP port probed on the InternalIP of egress nodes")
+	flag.DurationVar(&probeCfg.Timeout, "egress-node-probe-timeout", probeCfg.Timeout, "timeout of one TCP probe")
+	flag.DurationVar(&probeCfg.Interval, "egress-node-probe-interval", probeCfg.Interval, "wait time after a probe finishes before the next one")
+	flag.IntVar(&probeCfg.FailureThreshold, "egress-node-probe-failure-threshold", probeCfg.FailureThreshold, "consecutive probe failures that mark a node failed")
+	flag.BoolVar(&cfg.CiliumAgentCheck, "cilium-agent-check", true, "require a ready cilium-agent on a new active node")
 	flag.StringVar(&cfg.CiliumNamespace, "cilium-namespace", "kube-system", "namespace of the cilium-agent pods")
 	flag.StringVar(&ciliumSelector, "cilium-agent-selector", "k8s-app=cilium", "label selector of the cilium-agent pods")
 	flag.StringVar(&cfg.AgentNamespace, "agent-namespace", podNS, "namespace of the agent pods")
@@ -79,7 +82,7 @@ func main() {
 	if cfg.AgentSelector, err = labels.Parse(agentSelector); err != nil {
 		fail(err, "invalid --agent-selector")
 	}
-	if err := probeCfg.Validate(); err != nil {
+	if err := probeCfg.Validate(); probeEnabled && err != nil {
 		fail(err, "invalid probe flags")
 	}
 	if cfg.AgentNamespace == "" {
@@ -111,8 +114,11 @@ func main() {
 	}
 
 	// Only cache the cilium-agent and agent pods.
-	podNamespaces := map[string]cache.Config{cfg.CiliumNamespace: {LabelSelector: cfg.CiliumSelector}}
-	if cfg.AgentNamespace == cfg.CiliumNamespace {
+	podNamespaces := map[string]cache.Config{}
+	if cfg.CiliumAgentCheck {
+		podNamespaces[cfg.CiliumNamespace] = cache.Config{LabelSelector: cfg.CiliumSelector}
+	}
+	if cfg.CiliumAgentCheck && cfg.AgentNamespace == cfg.CiliumNamespace {
 		podNamespaces[cfg.AgentNamespace] = cache.Config{}
 	} else {
 		podNamespaces[cfg.AgentNamespace] = cache.Config{LabelSelector: cfg.AgentSelector}
@@ -149,9 +155,12 @@ func main() {
 		Config:   cfg,
 	}
 	// Probes only start when the elected replica reconciles and sets the targets.
-	prober := probe.New(probeCfg, nil, func(string) { r.Notify() })
-	defer prober.Stop()
-	r.Prober = prober
+	var prober *probe.Prober
+	if probeEnabled {
+		prober = probe.New(probeCfg, nil, func(string) { r.Notify() })
+		defer prober.Stop()
+		r.Prober = prober
+	}
 	if err := r.SetupWithManager(mgr); err != nil {
 		fail(err, "unable to set up controller")
 	}
@@ -174,7 +183,9 @@ func main() {
 	log.Info("starting controller")
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		log.Error(err, "manager exited")
-		prober.Stop()
+		if prober != nil {
+			prober.Stop()
+		}
 		os.Exit(1)
 	}
 }

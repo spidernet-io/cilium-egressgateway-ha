@@ -15,6 +15,7 @@ spec:
   - name: webhook
     port: 443
     targetPort: webhook
+{{- if .Values.ciliumEgressPolicyWebhook.enabled }}
 ---
 # caBundle is set by the controller at startup.
 apiVersion: admissionregistration.k8s.io/v1
@@ -30,7 +31,7 @@ webhooks:
   # With Ignore, a policy without egressIP would silently use the IP of the
   # default route interface. Only managed policies are sent here.
   failurePolicy: Fail
-  timeoutSeconds: {{ .Values.webhook.timeoutSeconds }}
+  timeoutSeconds: {{ .Values.ciliumEgressPolicyWebhook.timeoutSeconds }}
   clientConfig:
     service:
       name: {{ $name }}
@@ -44,6 +45,7 @@ webhooks:
   matchConditions:
   - name: managed-by-egressgateway-ha
     expression: {{ include "egwha.managedPolicyExpression" . | quote }}
+{{- end }}
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingWebhookConfiguration
@@ -52,11 +54,12 @@ metadata:
   labels:
     {{- include "egwha.labels" . | nindent 4 }}
 webhooks:
+{{- if .Values.ciliumEgressPolicyWebhook.enabled }}
 - name: validate-ciliumegressgatewaypolicy.egressgateway-ha.spidernet.io
   admissionReviewVersions: ["v1"]
   sideEffects: None
   failurePolicy: Fail
-  timeoutSeconds: {{ .Values.webhook.timeoutSeconds }}
+  timeoutSeconds: {{ .Values.ciliumEgressPolicyWebhook.timeoutSeconds }}
   clientConfig:
     service:
       name: {{ $name }}
@@ -70,11 +73,12 @@ webhooks:
   matchConditions:
   - name: managed-by-egressgateway-ha
     expression: {{ include "egwha.managedPolicyExpression" . | quote }}
+{{- end }}
 - name: validate-egressgatewayha.egressgateway-ha.spidernet.io
   admissionReviewVersions: ["v1"]
   sideEffects: None
   failurePolicy: Fail
-  timeoutSeconds: {{ .Values.webhook.timeoutSeconds }}
+  timeoutSeconds: 10
   clientConfig:
     service:
       name: {{ $name }}

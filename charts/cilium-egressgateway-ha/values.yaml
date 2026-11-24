@@ -1,55 +1,45 @@
-image:
-  repository: ghcr.io/spidernet-io/cilium-egressgateway-ha
-  # Defaults to the chart appVersion.
-  tag: ""
-  pullPolicy: IfNotPresent
-
-imagePullSecrets: []
-
-# Creates ServiceMonitors for the controller and agent metrics (requires the
-# Prometheus Operator CRDs).
-serviceMonitor:
-  enabled: false
-  interval: 30s
-  labels: {}
-
-# Used by the controller to create EgressGatewayHA "default" when it does not
-# exist. candidateNodeSelector also limits where the agent DaemonSet runs.
-egressGatewayHA:
+global:
+  # Nodes that may hold the egress IPs. Used for:
+  #   1. nodeAffinity of the agent DaemonSet, updated on every helm upgrade;
+  #   2. spec.egressNodeSelector of EgressGatewayHA "default", only when the
+  #      controller creates it. Later changes must also be made on the CR.
   # Required, e.g.
   #   matchLabels:
   #     node-role.example.com/egress: "true"
-  candidateNodeSelector: {}
-  interface: eth0
-  # Single IPs and "start-end" ranges.
-  egressIPs: []
-  # Defaults to the first IP of egressIPs.
-  defaultEgressIP: ""
-
-agent:
-  # Interval of the periodic reconcile.
-  reconcileInterval: 10s
-  # Interval of periodic gratuitous ARP; 0s only sends it when an egress IP is added.
-  garpInterval: 0s
-  # Health probe and metrics ports on the host network. The defaults avoid the
-  # ports used by cilium-agent (9876, 9879, 9890, 9962-9964).
-  healthPort: 9790
-  metricsPort: 9791
-  logLevel: info
-  podAnnotations: {}
-  priorityClassName: system-node-critical
-  # Gateway nodes are often tainted; tolerate everything by default.
-  tolerations:
-  - operator: Exists
-  resources: {}
+  egressNodeSelector: {}
+  # Replaces the registry of all images, e.g. for offline environments.
+  imageRegistryOverride: ""
+  imagePullSecrets: []
 
 controller:
+  image:
+    registry: ghcr.io
+    repository: spidernet-io/cilium-egressgateway-ha/controller
+    pullPolicy: IfNotPresent
+    # Takes precedence over tag.
+    digest: ""
+    # Defaults to the chart appVersion.
+    tag: ""
   replicas: 2
   # Interval of the periodic reconcile.
   resyncInterval: 10s
-  # TCP probe of the candidate nodes' InternalIP.
-  nodeProbe:
-    # TCP port; defaults to the kubelet port. A refused connection also counts as alive.
+
+  # Conditions of the active egress node. Always on:
+  #   - Node Ready: NotReady switches the egress IPs away; a new active node must be Ready.
+  #   - agent pod Ready: a new active node must have a ready agent. A not-ready
+  #     agent on the active node does not switch, the egress IPs are kept.
+  # Optional checks below.
+
+  # TCP probe of the egress nodes' InternalIP, checking the node kernel and network.
+  # When enabled:
+  #   - failureThreshold consecutive failures switch the egress IPs away;
+  #   - a new active node must have passed its last probe.
+  # When disabled, network failures neither switch nor affect the choice of the
+  # new active node. A node that loses all network still becomes NotReady after
+  # node-monitor-grace-period (about 40-50s) and is switched away.
+  egressNodeProbe:
+    enabled: true
+    # A refused connection also counts as alive.
     port: 10250
     # Timeout of one connection attempt; the kernel retransmits SYN within it.
     timeout: 2s
@@ -57,9 +47,18 @@ controller:
     interval: 5s
     # Consecutive failures that mark a node failed.
     failureThreshold: 3
-  # Where cilium-agent pods run; their readiness filters new active nodes.
-  ciliumNamespace: kube-system
-  ciliumAgentSelector: k8s-app=cilium
+
+  # Readiness of cilium-agent. Only affects the choice of the new active node;
+  # a not-ready cilium-agent on the active node never switches, the BPF maps are kept.
+  # When disabled, a node whose cilium-agent is down may be chosen, and egress
+  # traffic stays broken until cilium-agent recovers there.
+  ciliumAgentCheck:
+    enabled: true
+    namespace: kube-system
+    selector: k8s-app=cilium
+
+  # Port of the webhook server, shared by all webhooks.
+  webhookPort: 9443
   healthPort: 8081
   metricsPort: 8080
   logLevel: info
@@ -74,9 +73,64 @@ controller:
   - key: node-role.kubernetes.io/master
     operator: Exists
     effect: NoSchedule
-  resources: {}
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 1000m
+      memory: 512Mi
 
-webhook:
-  # Port of the webhook server in the controller pods.
-  port: 9443
+agent:
+  image:
+    registry: ghcr.io
+    repository: spidernet-io/cilium-egressgateway-ha/agent
+    pullPolicy: IfNotPresent
+    # Takes precedence over tag.
+    digest: ""
+    # Defaults to the chart appVersion.
+    tag: ""
+  # Interval of the periodic reconcile.
+  reconcileInterval: 10s
+  # Interval of periodic gratuitous ARP; 0s only sends it when an egress IP is added.
+  garpInterval: 0s
+  # Health probe and metrics ports on the host network. The defaults avoid the
+  # ports used by cilium-agent (9876, 9879, 9890, 9962-9964).
+  healthPort: 9790
+  metricsPort: 9791
+  logLevel: info
+  podAnnotations: {}
+  priorityClassName: system-node-critical
+  # Egress nodes are often tainted; tolerate everything by default.
+  tolerations:
+  - operator: Exists
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+# Defaults of EgressGatewayHA "default", only used when the controller creates it.
+egressGatewayHA:
+  interface: eth0
+  # Single IPs and "start-end" ranges. Required.
+  egressIPs: []
+  # Defaults to the first IP of egressIPs.
+  defaultEgressIP: ""
+
+# Defaults and validates managed CiliumEgressGatewayPolicies (nodeSelector
+# referencing egress-gw-active). When disabled, a managed policy without
+# egressIP is not defaulted and Cilium uses the IP of the default route
+# interface instead. The validation of EgressGatewayHA is always on.
+ciliumEgressPolicyWebhook:
+  enabled: true
   timeoutSeconds: 10
+
+# Creates ServiceMonitors for the controller and agent metrics (requires the
+# Prometheus Operator CRDs).
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  labels: {}

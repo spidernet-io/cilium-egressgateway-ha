@@ -47,6 +47,8 @@ func (s *condSet) set(t string, status metav1.ConditionStatus, reason, msg strin
 	s.cur[t] = c
 }
 
+func (s *condSet) remove(t string) { delete(s.cur, t) }
+
 func (s *condSet) get(t string) (metav1.Condition, bool) {
 	c, ok := s.cur[t]
 	return c, ok

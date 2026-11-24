@@ -27,7 +27,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
     spec:
-      {{- with .Values.imagePullSecrets }}
+      {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
@@ -42,15 +42,15 @@ spec:
           requiredDuringSchedulingIgnoredDuringExecution:
             nodeSelectorTerms:
             - matchExpressions:
-                {{- include "egwha.candidateMatchExpressions" . | trim | nindent 16 }}
+                {{- include "egwha.egressNodeMatchExpressions" . | trim | nindent 16 }}
       {{- with .Values.agent.tolerations }}
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       containers:
       - name: agent
-        image: {{ include "egwha.image" . }}
-        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        image: {{ include "egwha.image" (dict "root" . "image" .Values.agent.image) }}
+        imagePullPolicy: {{ .Values.agent.image.pullPolicy }}
         command: ["/usr/local/bin/agent"]
         args:
         - --reconcile-interval={{ .Values.agent.reconcileInterval }}

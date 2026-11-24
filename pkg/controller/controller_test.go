@@ -100,10 +100,10 @@ func newEGWHA(active string) *v1alpha1.EgressGatewayHA {
 	return &v1alpha1.EgressGatewayHA{
 		ObjectMeta: metav1.ObjectMeta{Name: v1alpha1.SingletonName, Generation: 1},
 		Spec: v1alpha1.EgressGatewayHASpec{
-			CandidateNodeSelector: metav1.LabelSelector{MatchLabels: map[string]string{"candidate": "true"}},
-			Interface:             "eth0",
-			EgressIPs:             []string{"10.0.0.100"},
-			ActiveNode:            active,
+			EgressNodeSelector: metav1.LabelSelector{MatchLabels: map[string]string{"candidate": "true"}},
+			Interface:          "eth0",
+			EgressIPs:          []string{"10.0.0.100"},
+			ActiveNode:         active,
 		},
 	}
 }
@@ -127,7 +127,7 @@ func newEnv(t *testing.T, egw *v1alpha1.EgressGatewayHA, nodes ...testNode) *env
 	e := &env{t: t, c: c, status: &fakeStatus{c: c}, recorder: events.NewFakeRecorder(100)}
 	e.r = &Reconciler{Client: c, Status: e.status, Recorder: e.recorder, Now: func() time.Time { return time.Unix(1_700_000_000, 0) },
 		Config: Config{
-			CiliumNamespace: ciliumNS, CiliumSelector: labels.SelectorFromSet(labels.Set{"k8s-app": "cilium"}),
+			CiliumAgentCheck: true, CiliumNamespace: ciliumNS, CiliumSelector: labels.SelectorFromSet(labels.Set{"k8s-app": "cilium"}),
 			AgentNamespace: agentNS, AgentSelector: labels.SelectorFromSet(labels.Set{"app": "agent"}),
 			ResyncInterval: 10 * time.Second,
 		}}
@@ -763,4 +763,34 @@ func TestMetricsAndComponentEvents(t *testing.T) {
 	if ev := e.events(); strings.Count(ev, "Warning EgressGatewayNotReady") != 1 {
 		t.Errorf("policy events = %q", ev)
 	}
+}
+
+func TestCiliumAgentCheckDisabled(t *testing.T) {
+	// n2's cilium-agent is not ready: skipped when the check is on.
+	e := steadyEnv(t, "n1", healthy("n1"), testNode{"n2", true, true, false, true})
+	e.r.Config.CiliumAgentCheck = false
+	e.setNodeReady("n1", false)
+	e.reconcile()
+	e.expect("n2", "n1")
+	if ev := e.events(); strings.Contains(ev, "CiliumAgentNotReady") {
+		t.Errorf("events = %q", ev)
+	}
+}
+
+func TestEgressNodeProbeDisabled(t *testing.T) {
+	e, p := probeEnv(t, "n1", healthy("n1"), healthy("n2"))
+	e.expectCond(v1alpha1.ConditionActiveNodeReachable, metav1.ConditionTrue, v1alpha1.ReasonProbeSucceeded, "")
+	p.fail("n1", 3)
+	// Disabling the probe drops its condition and status.candidates, and a
+	// failing probe no longer switches.
+	e.r.Prober = nil
+	e.reconcile()
+	e.expect("n1", "n1")
+	if c := meta.FindStatusCondition(e.egw().Status.Conditions, v1alpha1.ConditionActiveNodeReachable); c != nil {
+		t.Errorf("ActiveNodeReachable = %+v, want removed", c)
+	}
+	if got := e.egw().Status.Candidates; len(got) != 0 {
+		t.Errorf("status.candidates = %v, want empty", got)
+	}
+	e.expectCond(v1alpha1.ConditionReady, metav1.ConditionTrue, v1alpha1.ReasonAsExpected, "")
 }

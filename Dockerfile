@@ -1,3 +1,5 @@
 FROM alpine:3
 ARG TARGETARCH=amd64
-COPY bin/linux_${TARGETARCH}/ /usr/local/bin/
+# controller or agent
+ARG COMPONENT
+COPY bin/linux_${TARGETARCH}/${COMPONENT} /usr/local/bin/${COMPONENT}

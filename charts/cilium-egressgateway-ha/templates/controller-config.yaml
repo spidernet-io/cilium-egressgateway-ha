@@ -8,14 +8,14 @@ metadata:
 data:
   # Used only to create EgressGatewayHA "default" when it does not exist.
   default-spec.yaml: |
-    candidateNodeSelector:
-      {{- with .Values.egressGatewayHA.candidateNodeSelector.matchLabels }}
+    egressNodeSelector:
+      {{- with .Values.global.egressNodeSelector.matchLabels }}
       matchLabels:
         {{- range $k, $v := . }}
         {{ $k | quote }}: {{ $v | toString | quote }}
         {{- end }}
       {{- end }}
-      {{- with .Values.egressGatewayHA.candidateNodeSelector.matchExpressions }}
+      {{- with .Values.global.egressNodeSelector.matchExpressions }}
       matchExpressions:
         {{- toYaml . | nindent 8 }}
       {{- end }}

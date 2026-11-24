@@ -54,11 +54,13 @@ type switchRecord struct {
 }
 
 type Config struct {
-	CiliumNamespace string
-	CiliumSelector  labels.Selector
-	AgentNamespace  string
-	AgentSelector   labels.Selector
-	ResyncInterval  time.Duration
+	// CiliumAgentCheck requires a ready cilium-agent on a new active node.
+	CiliumAgentCheck bool
+	CiliumNamespace  string
+	CiliumSelector   labels.Selector
+	AgentNamespace   string
+	AgentSelector    labels.Selector
+	ResyncInterval   time.Duration
 	// Default is used to create EgressGatewayHA "default" when it does not exist.
 	Default *v1alpha1.EgressGatewayHASpec
 }
@@ -126,9 +128,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (ctrl.R
 		}
 		return ctrl.Result{RequeueAfter: r.Config.ResyncInterval}, nil
 	}
-	sel, err := metav1.LabelSelectorAsSelector(&egw.Spec.CandidateNodeSelector)
+	sel, err := metav1.LabelSelectorAsSelector(&egw.Spec.EgressNodeSelector)
 	if err != nil {
-		log.Error(err, "invalid spec.candidateNodeSelector, not reconciling")
+		log.Error(err, "invalid spec.egressNodeSelector, not reconciling")
 		return ctrl.Result{}, nil
 	}
 	snap, err := r.snapshot(ctx, sel, egw.Spec.ActiveNode)
@@ -195,9 +197,11 @@ func (r *Reconciler) snapshot(ctx context.Context, sel labels.Selector, active s
 		return nil, err
 	}
 	ciliumPods := &corev1.PodList{}
-	if err := r.Client.List(ctx, ciliumPods, client.InNamespace(r.Config.CiliumNamespace),
-		client.MatchingLabelsSelector{Selector: r.Config.CiliumSelector}); err != nil {
-		return nil, err
+	if r.Config.CiliumAgentCheck {
+		if err := r.Client.List(ctx, ciliumPods, client.InNamespace(r.Config.CiliumNamespace),
+			client.MatchingLabelsSelector{Selector: r.Config.CiliumSelector}); err != nil {
+			return nil, err
+		}
 	}
 	agentPods := &corev1.PodList{}
 	if err := r.Client.List(ctx, agentPods, client.InNamespace(r.Config.AgentNamespace),
@@ -205,6 +209,7 @@ func (r *Reconciler) snapshot(ctx context.Context, sel labels.Selector, active s
 		return nil, err
 	}
 	s := newSnapshot(sel, nodes.Items, cns.Items, ciliumPods.Items, agentPods.Items)
+	s.ciliumAgentCheck = r.Config.CiliumAgentCheck
 	s.setLabels(labelledNodes.Items, labelledCNs.Items)
 	if r.Prober != nil {
 		r.Prober.SetTargets(s.probeTargets(active))
@@ -416,7 +421,7 @@ func (st *state) candidatesSummary() string {
 		}
 	}
 	if len(out) == 0 {
-		return "no node matches candidateNodeSelector"
+		return "no node matches egressNodeSelector"
 	}
 	return fmt.Sprint(out)
 }
@@ -556,6 +561,8 @@ func (st *state) finishConditions() {
 // keeps the previous condition so that Ready does not flap.
 func (st *state) setReachable() {
 	if st.r.Prober == nil {
+		// The probe is disabled: drop a condition left by an earlier configuration.
+		st.conds.remove(v1alpha1.ConditionActiveNodeReachable)
 		return
 	}
 	active := st.egw.Spec.ActiveNode

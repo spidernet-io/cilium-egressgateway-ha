@@ -132,7 +132,7 @@ func TestWebhook(t *testing.T) {
 		}
 		for patch, denied := range map[string]string{
 			`{"spec":{"activeNode":"no-such-node"}}`:                        "node no-such-node not found",
-			`{"spec":{"activeNode":"` + worker3 + `"}}`:                     "does not match spec.candidateNodeSelector",
+			`{"spec":{"activeNode":"` + worker3 + `"}}`:                     "does not match spec.egressNodeSelector",
 			`{"spec":{"defaultEgressIP":"172.18.0.250"}}`:                   "spec.defaultEgressIP 172.18.0.250 is not in spec.egressIPs",
 			`{"spec":{"egressIPs":["172.18.0.200-172.18.0.204"]}}`:          "egress IPs still used by policies: egw-e2e-in-use (172.18.0.205)",
 			`{"spec":{"egressIPs":["172.18.0.200-172.18.0.210","bad-ip"]}}`: "spec.egressIPs",

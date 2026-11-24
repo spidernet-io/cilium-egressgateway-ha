@@ -375,7 +375,7 @@ func (r *Reconciler) CleanupOnExit(ctx context.Context, reader client.Reader) er
 	if err := reader.Get(ctx, client.ObjectKey{Name: r.Config.NodeName}, node); err != nil && !apierrors.IsNotFound(err) {
 		return err
 	}
-	sel, err := metav1.LabelSelectorAsSelector(&egw.Spec.CandidateNodeSelector)
+	sel, err := metav1.LabelSelectorAsSelector(&egw.Spec.EgressNodeSelector)
 	if err != nil {
 		return err
 	}
