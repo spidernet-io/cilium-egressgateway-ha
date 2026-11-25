@@ -82,7 +82,7 @@ egressGatewayHA:
 ```console
 $ helm install egwha egressgateway-ha/cilium-egressgateway-ha -n kube-system -f my-values.yaml --wait
 NAME: egwha
-LAST DEPLOYED: Wed Nov 25 07:06:06 2026
+LAST DEPLOYED: Wed Nov 25 10:57:44 2026
 NAMESPACE: kube-system
 STATUS: deployed
 REVISION: 1
@@ -112,20 +112,20 @@ controller 有 2 个副本，每个出口节点上有 1 个 agent：
 
 ```console
 $ kubectl -n kube-system get pods -l app.kubernetes.io/instance=egwha -o wide
-NAME                               READY   STATUS    RESTARTS   AGE   IP             NODE                    NOMINATED NODE   READINESS GATES
-egwha-agent-q9g2n                  1/1     Running   0          22s   172.21.0.4     egw-e2e-worker2         <none>           <none>
-egwha-agent-qg22k                  1/1     Running   0          22s   172.21.0.5     egw-e2e-worker          <none>           <none>
-egwha-agent-v72qm                  1/1     Running   0          22s   172.21.0.2     egw-e2e-control-plane   <none>           <none>
-egwha-controller-77f757c9b-6f5cr   1/1     Running   0          22s   10.244.0.106   egw-e2e-control-plane   <none>           <none>
-egwha-controller-77f757c9b-rfwcj   1/1     Running   0          22s   10.244.0.131   egw-e2e-control-plane   <none>           <none>
+NAME                                READY   STATUS    RESTARTS   AGE   IP             NODE                    NOMINATED NODE   READINESS GATES
+egwha-agent-fkhhg                   1/1     Running   0          27s   172.21.0.2     egw-e2e-control-plane   <none>           <none>
+egwha-agent-nr2ck                   1/1     Running   0          27s   172.21.0.4     egw-e2e-worker2         <none>           <none>
+egwha-agent-xdn6d                   1/1     Running   0          27s   172.21.0.5     egw-e2e-worker          <none>           <none>
+egwha-controller-7bf74795c6-fzbhj   1/1     Running   0          27s   10.244.0.90    egw-e2e-control-plane   <none>           <none>
+egwha-controller-7bf74795c6-nbpg7   1/1     Running   0          27s   10.244.0.106   egw-e2e-control-plane   <none>           <none>
 ```
 
 controller 创建了 `EgressGatewayHA default`，并选出了主网关：
 
 ```console
 $ kubectl get egressgatewayha
-NAME      ACTIVE            REACHABLE   READY   AGE
-default   egw-e2e-worker2   True        True    21s
+NAME      ACTIVE           REACHABLE   READY   AGE
+default   egw-e2e-worker   True        True    26s
 ```
 
 - `ACTIVE`：当前主网关。
@@ -174,12 +174,12 @@ $ kubectl get ciliumegressgatewaypolicy egress-app-a -o jsonpath='{.spec.egressG
 
 ## 6. 验证出口 IP
 
-在主网关 `egw-e2e-worker2` 上，出口 IP 以 /32 的形式配在网卡上，地址 label 为 `eth0:egw`：
+在主网关 `egw-e2e-worker` 上，出口 IP 以 /32 的形式配在网卡上，地址 label 为 `eth0:egw`：
 
 ```console
 $ ip -4 addr show dev eth0
-2: eth0@if59: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP group default  link-netnsid 0
-    inet 172.21.0.4/16 brd 172.21.255.255 scope global eth0
+2: eth0@if251: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP group default  link-netnsid 0
+    inet 172.21.0.5/16 brd 172.21.255.255 scope global eth0
        valid_lft forever preferred_lft forever
     inet 172.21.255.195/32 scope global eth0:egw
        valid_lft forever preferred_lft forever
@@ -189,7 +189,7 @@ $ ip -4 addr show dev eth0
 
 ```console
 $ kubectl -n app-a exec backend -- curl -s http://172.21.255.250:8080/clientip
-172.21.255.195:33102
+172.21.255.195:43512
 ```
 
 查看详细状态：
@@ -198,7 +198,7 @@ $ kubectl -n app-a exec backend -- curl -s http://172.21.255.250:8080/clientip
 $ kubectl get egressgatewayha default -o yaml
 ...
 spec:
-  activeNode: egw-e2e-worker2
+  activeNode: egw-e2e-worker
   egressIPs:
   - 172.21.255.195-172.21.255.205
   egressNodeSelector:
@@ -208,85 +208,88 @@ status:
   activeNode:
     egressIPs:
     - 172.21.255.195
-    name: egw-e2e-worker2
+    name: egw-e2e-worker
     ready: true
-  candidates:
-  - name: egw-e2e-control-plane
-    reachable: true
-  - name: egw-e2e-worker
-    reachable: true
-  - name: egw-e2e-worker2
-    reachable: true
   conditions:
-  - lastTransitionTime: "2026-11-25T07:06:08Z"
-    message: 'egw-e2e-worker2 became active node: egw-e2e-worker2 selected as the
-      initial active node'
+  - lastTransitionTime: "2026-11-25T10:57:46Z"
+    message: 'egw-e2e-worker became active node: egw-e2e-worker selected as the initial
+      active node'
     observedGeneration: 2
     reason: Initial
     status: "True"
     type: ActiveNodeElected
-  - lastTransitionTime: "2026-11-25T07:06:08Z"
-    message: probe to 172.21.0.4:10250 succeeded
+  - lastTransitionTime: "2026-11-25T10:57:46Z"
+    message: probe to 172.21.0.5:10250 succeeded
     observedGeneration: 2
     reason: ProbeSucceeded
     status: "True"
     type: ActiveNodeReachable
-  - lastTransitionTime: "2026-11-25T07:06:08Z"
-    message: egw-e2e-worker2 is Ready
+  - lastTransitionTime: "2026-11-25T10:57:46Z"
+    message: egw-e2e-worker is Ready
     observedGeneration: 2
     reason: KubeletReady
     status: "True"
     type: ActiveNodeReady
-  - lastTransitionTime: "2026-11-25T07:06:08Z"
-    message: switched <none> -> egw-e2e-worker2
+  - lastTransitionTime: "2026-11-25T10:57:46Z"
+    message: switched <none> -> egw-e2e-worker
     observedGeneration: 2
     reason: Completed
     status: "False"
     type: Switching
-  - lastTransitionTime: "2026-11-25T07:06:08Z"
-    message: egw-e2e-worker2 is the active node and its egress IPs are configured
+  - lastTransitionTime: "2026-11-25T10:57:46Z"
+    message: egw-e2e-worker is the active node and its egress IPs are configured
     observedGeneration: 2
     reason: AsExpected
     status: "True"
     type: Ready
-  - lastTransitionTime: "2026-11-25T07:06:08Z"
-    message: 1 egress IP(s) configured on eth0 (auto-detected) of egw-e2e-worker2
+  - lastTransitionTime: "2026-11-25T10:57:46Z"
+    message: 1 egress IP(s) configured on eth0 (auto-detected) of egw-e2e-worker
     observedGeneration: 2
     reason: EgressIPsConfigured
     status: "True"
     type: GatewayReady
+  egressNodes:
+  - lastTransitionTime: "2026-11-25T10:57:46Z"
+    name: egw-e2e-control-plane
+    reachable: true
+  - lastTransitionTime: "2026-11-25T10:57:46Z"
+    name: egw-e2e-worker
+    reachable: true
+  - lastTransitionTime: "2026-11-25T10:57:46Z"
+    name: egw-e2e-worker2
+    reachable: true
 ```
 
 - `status.activeNode`：主网关上已经配置的出口 IP。
-- `status.egressNodes`：各出口节点的 TCP 探测结果。
+- `status.egressNodes`：各出口节点的 TCP 探测结果。`lastTransitionTime` 是 `reachable` 最近一次变化的时间；探测失败时，`message` 写明原因。
 - `status.conditions`：选主、探测、切换和出口 IP 的状态。出现问题时，先看 `Ready` 的 reason 和 message。
 
 ## 7. 主备切换
 
 **故障切换**：主网关宕机、网络不可达或者 Node NotReady 时，controller 会自动把出口 IP 切到下一个可用的出口节点。故障节点恢复后不会自动切回。
 
-**手动切换**：例如维护前，先把主网关切到 `egw-e2e-worker`：
+**手动切换**：例如维护前，先把主网关切到 `egw-e2e-worker2`：
 
 ```console
-$ kubectl patch egressgatewayha default --type merge -p '{"spec":{"activeNode":"egw-e2e-worker"}}'
+$ kubectl patch egressgatewayha default --type merge -p '{"spec":{"activeNode":"egw-e2e-worker2"}}'
 egressgatewayha.egressgateway-ha.spidernet.io/default patched
 
 $ kubectl get egressgatewayha -w
-NAME      ACTIVE            REACHABLE   READY   AGE
-default   egw-e2e-worker2   True        True    60s
-default   egw-e2e-worker    True        True    61s
-default   egw-e2e-worker    True        True    61s
-default   egw-e2e-worker    True        False   61s
-default   egw-e2e-worker    True        False   62s
-default   egw-e2e-worker    True        False   62s
-default   egw-e2e-worker    True        True    62s
+NAME      ACTIVE           REACHABLE   READY   AGE
+default   egw-e2e-worker   True        True    60s
+default   egw-e2e-worker2   True        True    61s
+default   egw-e2e-worker2   True        True    61s
+default   egw-e2e-worker2   True        False   61s
+default   egw-e2e-worker2   True        False   62s
+default   egw-e2e-worker2   True        False   62s
+default   egw-e2e-worker2   True        True    62s
 ```
 
 `READY` 变为 `True`，说明切换完成，出口 IP 已经在新的主网关上。新建的连接仍然使用同一个出口 IP；切换时，已有的连接会断开。
 
 ```console
 $ kubectl -n app-a exec backend -- curl -s http://172.21.255.250:8080/clientip
-172.21.255.195:47626
+172.21.255.195:47760
 ```
 
 目标节点必须是出口节点，否则会被拒绝：
@@ -300,12 +303,12 @@ Error from server (Forbidden): admission webhook "validate-egressgatewayha.egres
 
 ```console
 $ kubectl get events --field-selector involvedObject.kind=EgressGatewayHA
-LAST SEEN   TYPE      REASON                          OBJECT                    MESSAGE
-71s         Warning   NoAvailableEgressNode            egressgatewayha/default   no available candidate for the initial active node: [egw-e2e-control-plane: egressgateway-ha agent not ready, TCP probe not finished yet egw-e2e-worker: egressgateway-ha agent not ready, TCP probe not finished yet egw-e2e-worker2: TCP probe not finished yet]
-70s         Normal    SwitchStarted                   egressgatewayha/default   switching <none> -> egw-e2e-worker2 (Initial): egw-e2e-worker2 selected as the initial active node
-70s         Normal    SwitchCompleted                 egressgatewayha/default   egw-e2e-worker2 became active node: egw-e2e-worker2 selected as the initial active node
-9s          Normal    SwitchStarted                   egressgatewayha/default   switching egw-e2e-worker2 -> egw-e2e-worker (Manual)
-8s          Normal    SwitchCompleted                 egressgatewayha/default   egw-e2e-worker became active node, manual switch from egw-e2e-worker2
+LAST SEEN   TYPE      REASON                  OBJECT                    MESSAGE
+70s         Warning   NoAvailableEgressNode   egressgatewayha/default   no available egress node for the initial active node: [egw-e2e-worker: egressgateway-ha agent not ready, TCP probe not finished yet egw-e2e-worker2: egressgateway-ha agent not ready, TCP probe not finished yet egw-e2e-control-plane: egressgateway-ha agent not ready, TCP probe not finished yet]
+69s         Normal    SwitchStarted           egressgatewayha/default   switching <none> -> egw-e2e-worker (Initial): egw-e2e-worker selected as the initial active node
+69s         Normal    SwitchCompleted         egressgatewayha/default   egw-e2e-worker became active node: egw-e2e-worker selected as the initial active node
+9s          Normal    SwitchStarted           egressgatewayha/default   switching egw-e2e-worker -> egw-e2e-worker2 (Manual)
+8s          Normal    SwitchCompleted         egressgatewayha/default   egw-e2e-worker2 became active node, manual switch from egw-e2e-worker
 ```
 
 刚安装时，agent 还没有就绪，可能会出现一条 `NoAvailableEgressNode` 告警，agent 就绪后会自动选出主网关。
@@ -322,16 +325,16 @@ release "egwha" uninstalled
 出口 IP 和主网关 label 仍然保留在主网关上，出口流量不受影响：
 
 ```console
-$ ip -4 addr show dev eth0 label eth0:egw        # 在主网关 egw-e2e-worker 上执行
+$ ip -4 addr show dev eth0 label eth0:egw        # 在主网关 egw-e2e-worker2 上执行
     inet 172.21.255.195/32 scope global eth0:egw
        valid_lft forever preferred_lft forever
 
 $ kubectl get nodes -l egressgateway-ha.spidernet.io/active-node=true
-NAME             STATUS   ROLES    AGE   VERSION
-egw-e2e-worker   Ready    <none>   20h   v1.36.1
+NAME              STATUS   ROLES    AGE   VERSION
+egw-e2e-worker2   Ready    <none>   24h   v1.36.1
 
 $ kubectl -n app-a exec backend -- curl -s http://172.21.255.250:8080/clientip
-172.21.255.195:47634
+172.21.255.195:47762
 ```
 
 如果要彻底清理：
@@ -345,8 +348,8 @@ egressgatewayha.egressgateway-ha.spidernet.io "default" deleted
 
 # 2. 删除主网关上的 label。cilium-agent 会把 Node 的 label 同步到 CiliumNode，
 #    如果 CiliumNode 上的 label 还在，再执行 kubectl label ciliumnode <节点> egressgateway-ha.spidernet.io/active-node-
-$ kubectl label node egw-e2e-worker egressgateway-ha.spidernet.io/active-node-
-node/egw-e2e-worker unlabeled
+$ kubectl label node egw-e2e-worker2 egressgateway-ha.spidernet.io/active-node-
+node/egw-e2e-worker2 unlabeled
 
 # 3. 在主网关上删除出口 IP
 $ ip addr del 172.21.255.195/32 dev eth0

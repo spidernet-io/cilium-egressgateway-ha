@@ -706,6 +706,18 @@ func TestProbeTargetsAndEgressNodesStatus(t *testing.T) {
 		t.Error("status written although no egress node changed")
 	}
 	expectNodes(v1alpha1.EgressNodeStatus{Name: "n1", Reachable: true, LastTransitionTime: at(0)}, failed)
+
+	// After a controller restart the probes have no result yet: the recorded
+	// state is kept, and the first results do not change the transition times.
+	e.r.Now = func() time.Time { return t0.Add(3 * time.Minute) }
+	p.results["n1"] = probe.Result{Threshold: 3}
+	p.results["n2"] = probe.Result{Threshold: 3}
+	e.reconcile()
+	expectNodes(v1alpha1.EgressNodeStatus{Name: "n1", Reachable: true, LastTransitionTime: at(0)}, failed)
+	delete(p.results, "n1")
+	p.fail("n2", 1)
+	e.reconcile()
+	expectNodes(v1alpha1.EgressNodeStatus{Name: "n1", Reachable: true, LastTransitionTime: at(0)}, failed)
 }
 
 func TestNodeChangeLogs(t *testing.T) {

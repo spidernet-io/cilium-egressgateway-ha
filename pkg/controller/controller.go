@@ -608,6 +608,13 @@ func (st *state) egressNodes() []v1alpha1.EgressNodeStatus {
 	var out []v1alpha1.EgressNodeStatus
 	for _, name := range st.snap.egressNodeNames() {
 		res, _ := st.r.Prober.Get(name)
+		p, had := prev[name]
+		if !res.Probed && had {
+			// No result yet, e.g. right after a controller restart: keep the
+			// recorded state instead of reporting a transition.
+			out = append(out, p)
+			continue
+		}
 		n := v1alpha1.EgressNodeStatus{Name: name, Reachable: res.Reachable(), LastTransitionTime: now}
 		switch {
 		case !res.Probed:
@@ -616,7 +623,7 @@ func (st *state) egressNodes() []v1alpha1.EgressNodeStatus {
 			// Without the failure count, so the message does not change on every probe.
 			n.Message = fmt.Sprintf("probe to %s failed: %s", res.Addr, res.LastError)
 		}
-		if p, ok := prev[name]; ok && p.Reachable == n.Reachable {
+		if had && p.Reachable == n.Reachable {
 			n.LastTransitionTime = p.LastTransitionTime
 		}
 		out = append(out, n)
