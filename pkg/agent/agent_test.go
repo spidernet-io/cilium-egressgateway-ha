@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 	"slices"
@@ -43,6 +44,9 @@ type fakeOps struct {
 	conflicts map[netip.Addr]string
 	detected  []netip.Addr
 	announced []netip.Addr
+	// found is returned by FindInterface; empty means not found.
+	found     string
+	findInput []netip.Addr
 }
 
 func newFakeOps() *fakeOps {
@@ -89,6 +93,14 @@ func (f *fakeOps) Detect(_ context.Context, _ string, ip netip.Addr) error {
 		return &netops.Conflict{IP: ip, MAC: hw}
 	}
 	return nil
+}
+
+func (f *fakeOps) FindInterface(ips []netip.Addr) (string, error) {
+	f.findInput = ips
+	if f.found == "" {
+		return "", fmt.Errorf("%w: no match", netops.ErrInterfaceNotFound)
+	}
+	return f.found, nil
 }
 
 func (f *fakeOps) Announce(_ string, ip netip.Addr) error {
@@ -303,6 +315,43 @@ func TestActiveNodeInterfaceNotFound(t *testing.T) {
 	}
 	if e.status.active.Ready || e.status.cond.Reason != v1alpha1.ReasonInterfaceNotFound ||
 		!strings.Contains(e.status.cond.Message, "interface missing0 not found on node1") {
+		t.Fatalf("status = %+v, condition = %+v", e.status.active, e.status.cond)
+	}
+}
+
+func TestActiveNodeDetectsInterface(t *testing.T) {
+	obj := egwha(node)
+	obj.Spec.Interface = ""
+	e := newEnv(t, nil, obj, policy("a", "172.18.0.201", true))
+	e.ops.found = "eth1"
+	e.ops.ifaces["eth0"] = []netip.Addr{ip200} // left on a previously used interface
+	if err := e.reconcile(t); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(e.ops.findInput, []netip.Addr{ip201, ip200}) {
+		t.Errorf("FindInterface input = %v, want desired IPs, then range starts", e.ops.findInput)
+	}
+	if !slices.Equal(e.ops.ifaces["eth1"], []netip.Addr{ip201}) || len(e.ops.ifaces["eth0"]) != 0 {
+		t.Fatalf("ifaces = %v", e.ops.ifaces)
+	}
+	if !e.status.active.Ready || !strings.Contains(e.status.cond.Message, "on eth1 (auto-detected) of node1") {
+		t.Fatalf("status = %+v, condition = %+v", e.status.active, e.status.cond)
+	}
+}
+
+func TestActiveNodeInterfaceNotDetectedKeepsIPs(t *testing.T) {
+	obj := egwha(node)
+	obj.Spec.Interface = ""
+	e := newEnv(t, nil, obj, policy("a", "172.18.0.200", true))
+	e.ops.ifaces["eth0"] = []netip.Addr{ip200}
+	if err := e.reconcile(t); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(e.ops.ifaces["eth0"], []netip.Addr{ip200}) {
+		t.Fatalf("egress IPs changed: %v", e.ops.ifaces)
+	}
+	if e.status.active.Ready || e.status.cond.Reason != v1alpha1.ReasonInterfaceNotFound ||
+		!strings.Contains(e.status.cond.Message, "set spec.interface") {
 		t.Fatalf("status = %+v, condition = %+v", e.status.active, e.status.cond)
 	}
 }

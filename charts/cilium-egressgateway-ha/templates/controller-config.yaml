@@ -19,7 +19,9 @@ data:
       matchExpressions:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-    interface: {{ .Values.egressGatewayHA.interface | quote }}
+    {{- with .Values.egressGatewayHA.interface }}
+    interface: {{ . | quote }}
+    {{- end }}
     egressIPs:
       {{- if empty .Values.egressGatewayHA.egressIPs }}{{ fail "egressGatewayHA.egressIPs must not be empty" }}{{ end }}
       {{- toYaml .Values.egressGatewayHA.egressIPs | nindent 6 }}

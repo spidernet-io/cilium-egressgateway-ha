@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"slices"
 	"time"
 
 	"github.com/mdlayher/arp"
@@ -137,6 +138,85 @@ func listManaged(l netlink.Link, label string) ([]netip.Addr, error) {
 		}
 	}
 	return out, nil
+}
+
+// FindInterface selects the interface for egress IPs when none is configured:
+// the first interface (by index) whose IPv4 subnet contains one of ips, tried
+// in order, or else the interface of the IPv4 default route with the lowest
+// metric. Host routes (/32) are ignored, so managed egress IPs never match.
+func (m *Manager) FindInterface(ips []netip.Addr) (string, error) {
+	links, err := netlink.LinkList()
+	if err != nil {
+		return "", fmt.Errorf("list interfaces: %w", err)
+	}
+	var subnets []ifaceSubnet
+	names := map[int]string{}
+	for _, l := range links {
+		attrs := l.Attrs()
+		names[attrs.Index] = attrs.Name
+		if attrs.Flags&net.FlagUp == 0 || attrs.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := netlink.AddrList(l, netlink.FAMILY_V4)
+		if err != nil {
+			return "", fmt.Errorf("list addresses on %s: %w", attrs.Name, err)
+		}
+		for _, a := range addrs {
+			if a.IPNet == nil {
+				continue
+			}
+			ip, ok := netip.AddrFromSlice(a.IP.To4())
+			ones, _ := a.Mask.Size()
+			if ok {
+				subnets = append(subnets, ifaceSubnet{attrs.Name, netip.PrefixFrom(ip, ones).Masked()})
+			}
+		}
+	}
+	routes, err := netlink.RouteListFiltered(netlink.FAMILY_V4,
+		&netlink.Route{Table: unix.RT_TABLE_MAIN}, netlink.RT_FILTER_TABLE)
+	if err != nil {
+		return "", fmt.Errorf("list routes: %w", err)
+	}
+	var defaults []defaultRoute
+	for _, r := range routes {
+		if r.Dst != nil {
+			if ones, _ := r.Dst.Mask.Size(); ones != 0 {
+				continue
+			}
+		}
+		idx := r.LinkIndex
+		if idx == 0 && len(r.MultiPath) > 0 {
+			idx = r.MultiPath[0].LinkIndex
+		}
+		if name, ok := names[idx]; ok {
+			defaults = append(defaults, defaultRoute{name, r.Priority})
+		}
+	}
+	return selectInterface(subnets, defaults, ips)
+}
+
+type ifaceSubnet struct {
+	iface  string
+	subnet netip.Prefix
+}
+
+type defaultRoute struct {
+	iface  string
+	metric int
+}
+
+func selectInterface(subnets []ifaceSubnet, defaults []defaultRoute, ips []netip.Addr) (string, error) {
+	for _, ip := range ips {
+		for _, s := range subnets {
+			if s.subnet.Bits() < 32 && s.subnet.Contains(ip) {
+				return s.iface, nil
+			}
+		}
+	}
+	if len(defaults) > 0 {
+		return slices.MinFunc(defaults, func(a, b defaultRoute) int { return a.metric - b.metric }).iface, nil
+	}
+	return "", fmt.Errorf("%w: no interface has a subnet containing the egress IPs and there is no IPv4 default route", ErrInterfaceNotFound)
 }
 
 func addr(ip netip.Addr, label string) *netlink.Addr {

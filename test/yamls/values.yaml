@@ -6,6 +6,3 @@ agent:
 
 controller:
   logLevel: debug
-
-egressGatewayHA:
-  interface: eth0

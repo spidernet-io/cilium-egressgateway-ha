@@ -55,6 +55,7 @@ type NetOps interface {
 	Del(iface string, ip netip.Addr) error
 	Detect(ctx context.Context, iface string, ip netip.Addr) error
 	Announce(iface string, ip netip.Addr) error
+	FindInterface(ips []netip.Addr) (string, error)
 }
 
 // StatusWriter writes the fields of EgressGatewayHA status owned by the agent.
@@ -79,6 +80,8 @@ type Reconciler struct {
 
 	synced   atomic.Bool
 	lastGARP time.Time
+	// detected is the last auto-detected interface, used to log changes.
+	detected string
 }
 
 func (r *Reconciler) now() time.Time {
@@ -165,7 +168,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (ctrl.R
 		log.Error(err, "invalid spec.egressIPs, keeping egress IPs unchanged")
 		return r.requeue(), nil
 	}
-	err = r.configure(ctx, egw, desiredIPs(ctx, r.Config.ActiveLabel, policies.Items, allowed))
+	err = r.configure(ctx, egw, desiredIPs(ctx, r.Config.ActiveLabel, policies.Items, allowed), allowed)
 	r.updateIPMetric()
 	return r.result(err)
 }
@@ -224,9 +227,43 @@ func (r *Reconciler) releaseAll(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-func (r *Reconciler) configure(ctx context.Context, egw *v1alpha1.EgressGatewayHA, desired []netip.Addr) error {
+// resolveInterface returns spec.interface, or detects it when empty, trying
+// the desired egress IPs first and then the start of each allowed range.
+func (r *Reconciler) resolveInterface(ctx context.Context, egw *v1alpha1.EgressGatewayHA, desired []netip.Addr, allowed iprange.List) (string, error) {
+	if egw.Spec.Interface != "" {
+		return egw.Spec.Interface, nil
+	}
+	ips := slices.Clone(desired)
+	for _, rg := range allowed {
+		ips = append(ips, rg.Start)
+	}
+	iface, err := r.Ops.FindInterface(ips)
+	if err != nil {
+		return "", err
+	}
+	if iface != r.detected {
+		logf.FromContext(ctx).Info("detected egress interface", "interface", iface)
+		r.detected = iface
+	}
+	return iface, nil
+}
+
+func (r *Reconciler) configure(ctx context.Context, egw *v1alpha1.EgressGatewayHA, desired []netip.Addr, allowed iprange.List) error {
 	log := logf.FromContext(ctx)
-	iface := egw.Spec.Interface
+	iface, err := r.resolveInterface(ctx, egw, desired, allowed)
+	if errors.Is(err, netops.ErrInterfaceNotFound) {
+		// Keep the current egress IPs: a detection failure must not cut egress traffic.
+		cond := r.condition(egw, metav1.ConditionFalse, v1alpha1.ReasonInterfaceNotFound,
+			fmt.Sprintf("interface not detected on %s: %v; set spec.interface", r.Config.NodeName, err))
+		return r.writeStatus(ctx, egw, nil, false, cond)
+	}
+	if err != nil {
+		return err
+	}
+	ifaceDesc := iface
+	if egw.Spec.Interface == "" {
+		ifaceDesc += " (auto-detected)"
+	}
 
 	// Remove managed IPs that are on another interface or no longer used.
 	all, err := r.Ops.ListAll()
@@ -309,7 +346,7 @@ func (r *Reconciler) configure(ctx context.Context, egw *v1alpha1.EgressGatewayH
 		cond = r.condition(egw, metav1.ConditionFalse, v1alpha1.ReasonConfigureFailed, strings.Join(failures, "; "))
 	default:
 		cond = r.condition(egw, metav1.ConditionTrue, v1alpha1.ReasonEgressIPsConfigured,
-			fmt.Sprintf("%d egress IP(s) configured on %s of %s", len(configured), iface, r.Config.NodeName))
+			fmt.Sprintf("%d egress IP(s) configured on %s of %s", len(configured), ifaceDesc, r.Config.NodeName))
 	}
 	ready := len(conflicts) == 0 && len(failures) == 0
 	errs = append(errs, r.writeStatus(ctx, egw, configured, ready, cond))

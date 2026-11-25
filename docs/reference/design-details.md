@@ -17,7 +17,7 @@ spec:
   egressNodeSelector:               # 出口节点，即候选网关节点
     matchLabels:
       egressgateway-ha.spidernet.io/candidate-node: "true"
-  interface: eth0                   # agent 把出口 IP 配到这块网卡上。不会写入 policy
+  interface: eth0                   # 可选。agent 把出口 IP 配到这块网卡上，不填时自动选择。不会写入 policy
   egressIPs:                        # 允许使用的出口 IP，支持单个 IP 和地址范围
   - 192.168.10.100-192.168.10.110
   - 192.168.10.120
@@ -176,12 +176,21 @@ agent 持续 watch `EgressGatewayHA` 和被管理的 policy，并每 `reconcileI
 
 **本节点是 `spec.activeNode`**：
 
+先确定出口网卡：使用 `spec.interface`；为空时自动选择，因此各节点的网卡名可以不同。
+
+- 优先选择 IPv4 子网包含出口 IP 的网卡。依次尝试 policy 使用的出口 IP 和 `spec.egressIPs` 中每段的起始 IP，同一个 IP 匹配多块网卡时取 ifindex 最小的。/32 地址不参与匹配，因此不会匹配到已经配置的出口 IP。出口 IP 需要和这块网卡在同一个二层网段，GARP 才能生效，所以按子网选择最准确。
+- 都不匹配时，选择 metric 最小的 IPv4 默认路由所在的网卡。
+- 仍然找不到时，不修改已有的出口 IP，设置 `GatewayReady=False`（reason `InterfaceNotFound`），提示设置 `spec.interface`。
+- 自动选择时，`GatewayReady` 的 message 带有 `(auto-detected)`，例如 `1 egress IP(s) configured on eth0 (auto-detected) of node1`。
+
+然后：
+
 1. 对每个还不在网卡上的出口 IP，先做**重复地址检测**（发送源地址为 0.0.0.0 的 ARP 探测，相当于 `arping -D`）：
    - 有设备回应：说明其他节点仍然持有这个 IP。不添加，设置 `GatewayReady=False`（reason `EgressIPConflict`，message 写明冲突的 IP 和回应的 MAC 地址），等待下一轮重试。
    - 没有回应：以 /32 添加到 `spec.interface`，然后发送 GARP。
    - 已经在网卡上的出口 IP 不再做重复地址检测，例如升级前留下的 IP。
 2. 新增了出口 IP 时，patch 本节点 CiliumNode 的 annotation（`egressgateway-ha.spidernet.io/egress-ip-synced=<timestamp>`），触发 Cilium 重新查找 egressIP（见 [Cilium 行为分析](cilium-behavior.md) 第 3 节）。
-3. 更新 status：`status.activeNode.name` 为本节点，`egressIPs` 为已配置的 IP；所有 IP 都已配置时，`ready: true`，`GatewayReady=True`。`spec.interface` 不存在时，`GatewayReady=False`，reason 为 `InterfaceNotFound`；添加 IP 等操作失败时，reason 为 `ConfigureFailed`。只在状态变化时更新。
+3. 更新 status：`status.activeNode.name` 为本节点，`egressIPs` 为已配置的 IP；所有 IP 都已配置时，`ready: true`，`GatewayReady=True`。出口网卡不存在或无法自动选择时，`GatewayReady=False`，reason 为 `InterfaceNotFound`；添加 IP 等操作失败时，reason 为 `ConfigureFailed`。只在状态变化时更新。
 4. 如果 `garpInterval > 0`，按间隔重发 GARP。
 
 另外删除其他网卡上被管理的出口 IP，例如修改 `spec.interface` 后旧网卡上留下的 IP。
@@ -220,7 +229,7 @@ controller 的两个副本都提供 webhook 服务，不依赖工作实例。
 ### 4.2 Mutating
 
 - 只补全 egressIP：`egressGateway.egressIP` 为空时，填入 `EgressGatewayHA` 的 `spec.defaultEgressIP`。
-- **不补全 interface。** Cilium 不允许 policy 同时指定 `egressIP` 和 `interface`，否则所有 cilium-agent 都会忽略这个 policy（见 [Cilium 行为分析](cilium-behavior.md) 第 5 节）。出口 IP 配在哪块网卡，由 `EgressGatewayHA.spec.interface` 决定：agent 把 IP 配到这块网卡上，Cilium 再按 egressIP 找到持有它的网卡。
+- **不补全 interface。** Cilium 不允许 policy 同时指定 `egressIP` 和 `interface`，否则所有 cilium-agent 都会忽略这个 policy（见 [Cilium 行为分析](cilium-behavior.md) 第 5 节）。出口 IP 配在哪块网卡，由 `EgressGatewayHA.spec.interface` 或 agent 自动选择决定：agent 把 IP 配到这块网卡上，Cilium 再按 egressIP 找到持有它的网卡。
 - 不修改 nodeSelector，由用户自己填写。
 
 ### 4.3 Validating

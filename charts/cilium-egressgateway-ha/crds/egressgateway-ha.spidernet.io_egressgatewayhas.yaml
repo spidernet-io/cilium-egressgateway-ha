@@ -122,15 +122,15 @@ spec:
                 type: object
                 x-kubernetes-map-type: atomic
               interface:
-                description: Interface is the network interface the agent configures
-                  egress IPs on.
+                description: |-
+                  Interface is the network interface the agent configures egress IPs on.
+                  When empty, the agent on the active node selects the interface whose
+                  IPv4 subnet contains the egress IPs, or else the default route interface.
                 maxLength: 15
-                minLength: 1
                 type: string
             required:
             - egressIPs
             - egressNodeSelector
-            - interface
             type: object
           status:
             description: EgressGatewayHAStatus defines the observed state of EgressGatewayHA.

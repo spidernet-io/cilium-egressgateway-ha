@@ -9,6 +9,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/spidernet-io/cilium-egressgateway-ha/api/v1alpha1"
@@ -39,6 +40,12 @@ var _ = Describe("Switchover", Ordered, func() {
 	It("elects an active node and egress traffic uses the egress IP", func() {
 		active = WaitSteady(c, "")
 		WaitSourceIP(E.EgressIP())
+		// spec.interface is not set in the e2e values, so it is auto-detected.
+		egw, err := GetEGWHA(c)
+		Expect(err).NotTo(HaveOccurred())
+		cond := meta.FindStatusCondition(egw.Status.Conditions, v1alpha1.ConditionGatewayReady)
+		Expect(cond).NotTo(BeNil())
+		Expect(cond.Message).To(ContainSubstring("on eth0 (auto-detected) of " + active))
 	})
 
 	It("keeps the egress IP and traffic while the agent restarts", func() {

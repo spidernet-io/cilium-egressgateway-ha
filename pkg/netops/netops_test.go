@@ -209,6 +209,45 @@ func TestDetect(t *testing.T) {
 	}
 }
 
+func TestSelectInterface(t *testing.T) {
+	pfx := netip.MustParsePrefix
+	ip := netip.MustParseAddr
+	subnets := []ifaceSubnet{
+		{"cilium_host", pfx("10.244.1.5/32")},
+		{"eth0", pfx("172.18.0.0/16")},
+		{"eth1", pfx("192.168.10.0/24")},
+	}
+	defaults := []defaultRoute{{"eth1", 200}, {"eth0", 100}}
+	for name, tc := range map[string]struct {
+		ips  []netip.Addr
+		want string
+	}{
+		"subnet match":                {[]netip.Addr{ip("192.168.10.100")}, "eth1"},
+		"earlier IP wins":             {[]netip.Addr{ip("10.0.0.1"), ip("172.18.255.200"), ip("192.168.10.1")}, "eth0"},
+		"host route ignored":          {[]netip.Addr{ip("10.244.1.5")}, "eth0"},
+		"default route lowest metric": {[]netip.Addr{ip("10.0.0.1")}, "eth0"},
+	} {
+		if got, err := selectInterface(subnets, defaults, tc.ips); err != nil || got != tc.want {
+			t.Errorf("%s: got %q, %v, want %q", name, got, err, tc.want)
+		}
+	}
+	if _, err := selectInterface(subnets, nil, []netip.Addr{ip("10.0.0.1")}); !errors.Is(err, ErrInterfaceNotFound) {
+		t.Errorf("no match and no default route: err = %v, want ErrInterfaceNotFound", err)
+	}
+}
+
+func TestFindInterface(t *testing.T) {
+	newTestbed(t)
+	run(t, "ip", "addr", "add", "10.99.0.1/24", "dev", "egw0")
+	got, err := New().FindInterface([]netip.Addr{netip.MustParseAddr("10.99.0.10")})
+	if err != nil || got != "egw0" {
+		t.Fatalf("FindInterface() = %q, %v, want egw0", got, err)
+	}
+	if _, err := New().FindInterface([]netip.Addr{netip.MustParseAddr("10.98.0.10")}); !errors.Is(err, ErrInterfaceNotFound) {
+		t.Errorf("FindInterface(no match, no default route) err = %v, want ErrInterfaceNotFound", err)
+	}
+}
+
 func TestAnnounce(t *testing.T) {
 	b := newTestbed(t)
 	m := New()

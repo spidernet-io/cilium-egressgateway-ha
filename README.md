@@ -11,7 +11,6 @@ High availability for the Cilium community Egress Gateway. See the [design doc](
 kubectl label node <egress nodes> egressgateway-ha.spidernet.io/candidate-node=true
 helm repo add egressgateway-ha https://spidernet-io.github.io/cilium-egressgateway-ha
 helm install egwha egressgateway-ha/cilium-egressgateway-ha -n kube-system \
-  --set egressGatewayHA.interface=eth0 \
   --set 'egressGatewayHA.egressIPs={192.168.10.100-192.168.10.110}'
 kubectl get egressgatewayha
 ```

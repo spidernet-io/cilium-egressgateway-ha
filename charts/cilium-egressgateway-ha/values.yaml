@@ -122,7 +122,9 @@ agent:
 
 # Defaults of EgressGatewayHA "default", only used when the controller creates it.
 egressGatewayHA:
-  interface: eth0
+  # Interface for egress IPs. Empty: the agent selects the interface whose IPv4
+  # subnet contains the egress IPs, or else the default route interface.
+  interface: ""
   # Single IPs and "start-end" ranges. Required.
   egressIPs: []
   # Defaults to the first IP of egressIPs.

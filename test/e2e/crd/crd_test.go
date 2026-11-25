@@ -12,6 +12,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/spidernet-io/cilium-egressgateway-ha/api/v1alpha1"
+	"github.com/spidernet-io/cilium-egressgateway-ha/test/e2e/common"
 )
 
 func sample(name string) *v1alpha1.EgressGatewayHA {
@@ -36,8 +37,14 @@ var _ = Describe("EgressGatewayHA CRD", func() {
 	It("rejects missing required fields", func() {
 		obj := sample(v1alpha1.SingletonName)
 		obj.Spec.EgressIPs = nil
-		obj.Spec.Interface = ""
 		err := c.Create(context.Background(), obj, client.DryRunAll)
 		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "got %v", err)
+	})
+
+	It("accepts an omitted interface", func() {
+		obj, err := common.GetEGWHA(c)
+		Expect(err).NotTo(HaveOccurred())
+		obj.Spec.Interface = ""
+		Expect(c.Update(context.Background(), obj, client.DryRunAll)).To(Succeed())
 	})
 })

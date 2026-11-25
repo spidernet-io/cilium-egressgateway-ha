@@ -52,7 +52,7 @@ controller 只负责做决定，agent 只负责执行。
 ### 2.2 数据面如何工作
 
 1. 用户的 policy 中，nodeSelector 写的是 `egressgateway-ha.spidernet.io/active-node: "true"`。所有 cilium-agent 都把带这个 label 的节点作为网关，业务 Pod 的出口流量经 VXLAN 送到这个节点。
-2. 主网关上的 agent 把出口 IP 以 /32 配到 `spec.interface` 上，并发送 GARP，让上游把出口 IP 指向这个节点。
+2. 主网关上的 agent 把出口 IP 以 /32 配到出口网卡上（`spec.interface`，不填时自动选择），并发送 GARP，让上游把出口 IP 指向这个节点。
 3. 主网关上的 cilium-agent 找到网卡上的出口 IP，在 BPF 中把出口流量 SNAT 成这个 IP。
 
 出口 IP 配好以后，转发只依赖两样东西：网卡上的出口 IP，以及 Cilium 的 BPF map。它和 controller、agent、API Server 都没有关系。这是"控制面问题不影响数据面"的基础：
@@ -301,7 +301,7 @@ agent:
   reconcileInterval: 10s            # agent 定期 reconcile 的间隔
 
 egressGatewayHA:                    # controller 创建 EgressGatewayHA default 时使用，只在 CR 不存在时生效
-  interface: eth0
+  interface: ""                     # 出口网卡。为空时自动选择，见设计细节 3.2
   egressIPs:                        # 支持单个 IP 和地址范围
   - 192.168.10.100-192.168.10.110
   defaultEgressIP: ""               # 为空时取 egressIPs 中的第一个

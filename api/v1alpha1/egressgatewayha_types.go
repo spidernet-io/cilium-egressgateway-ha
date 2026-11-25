@@ -57,10 +57,11 @@ type EgressGatewayHASpec struct {
 	EgressNodeSelector metav1.LabelSelector `json:"egressNodeSelector"`
 
 	// Interface is the network interface the agent configures egress IPs on.
-	// +required
-	// +kubebuilder:validation:MinLength=1
+	// When empty, the agent on the active node selects the interface whose
+	// IPv4 subnet contains the egress IPs, or else the default route interface.
+	// +optional
 	// +kubebuilder:validation:MaxLength=15
-	Interface string `json:"interface"`
+	Interface string `json:"interface,omitempty"`
 
 	// EgressIPs lists the allowed egress IPs. Each item is an IPv4 address or
 	// an inclusive range in the form "start-end".
