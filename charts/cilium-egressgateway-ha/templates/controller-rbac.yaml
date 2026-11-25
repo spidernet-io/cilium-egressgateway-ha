@@ -73,6 +73,10 @@ rules:
 - apiGroups: ["coordination.k8s.io"]
   resources: ["leases"]
   verbs: ["get", "create", "update"]
+# Leader election records events through the core/v1 Events API.
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["create", "patch"]
 # Store the self-signed webhook certificate.
 - apiGroups: [""]
   resources: ["secrets"]
