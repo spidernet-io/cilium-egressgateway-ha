@@ -552,6 +552,9 @@ func (st *state) finishConditions() {
 		notReady(v1alpha1.ConditionActiveNodeReachable, get(v1alpha1.ConditionActiveNodeReachable), metav1.ConditionTrue):
 	case notReady(v1alpha1.ConditionActiveNodeReady, get(v1alpha1.ConditionActiveNodeReady), metav1.ConditionTrue):
 	case notReady(v1alpha1.ConditionGatewayReady, gw, metav1.ConditionTrue):
+	case gw.Reason == v1alpha1.ReasonNoManagedPolicy:
+		c.set(v1alpha1.ConditionReady, metav1.ConditionTrue, v1alpha1.ReasonAsExpected,
+			fmt.Sprintf("%s is the active node; no managed CiliumEgressGatewayPolicy uses an egress IP yet", active))
 	default:
 		c.set(v1alpha1.ConditionReady, metav1.ConditionTrue, v1alpha1.ReasonAsExpected,
 			fmt.Sprintf("%s is the active node and its egress IPs are configured", active))

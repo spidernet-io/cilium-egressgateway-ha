@@ -46,6 +46,8 @@ const (
 	ReasonEgressIPsConfigured = "EgressIPsConfigured"
 	ReasonInterfaceNotFound   = "InterfaceNotFound"
 	ReasonConfigureFailed     = "ConfigureFailed"
+	// ReasonNoManagedPolicy means no managed policy uses an egress IP, so none is configured.
+	ReasonNoManagedPolicy = "NoManagedPolicy"
 
 	ReasonAsExpected = "AsExpected"
 )

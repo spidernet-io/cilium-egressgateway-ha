@@ -258,6 +258,17 @@ func TestActiveNodeConfiguresEgressIPs(t *testing.T) {
 	}
 }
 
+func TestActiveNodeWithoutManagedPolicy(t *testing.T) {
+	e := newEnv(t, nil, egwha(node), policy("d", "172.18.0.205", false))
+	if err := e.reconcile(t); err != nil {
+		t.Fatal(err)
+	}
+	if len(e.ops.ifaces["eth0"]) != 0 || !e.status.active.Ready ||
+		e.status.cond.Status != metav1.ConditionTrue || e.status.cond.Reason != v1alpha1.ReasonNoManagedPolicy {
+		t.Fatalf("ifaces = %v, status = %+v, condition = %+v", e.ops.ifaces, e.status.active, e.status.cond)
+	}
+}
+
 func TestActiveNodeKeepsExistingIPsWithoutDAD(t *testing.T) {
 	e := newEnv(t, nil, egwha(node), policy("a", "172.18.0.200", true))
 	e.ops.ifaces["eth0"] = []netip.Addr{ip200}

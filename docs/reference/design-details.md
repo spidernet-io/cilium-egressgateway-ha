@@ -58,7 +58,7 @@ status:
 | `ActiveNodeReachable` | controller | 主网关的 TCP 探测结果 | `ProbeSucceeded`、`ProbeFailed`；还没有探测结果时为 `Probing`，没有主网关时为 `NoActiveNode`（status 都为 Unknown） | `3/3 probes to 172.18.0.3:10250 failed: i/o timeout` |
 | `ActiveNodeReady` | controller | 主网关 Node 的 Ready 状态 | 沿用 Node Ready condition 的 reason，例如 `KubeletReady`、`NodeStatusUnknown`；Node 不存在时为 `NodeNotFound`；还没有主网关时为 `NoActiveNode`（status 为 Unknown） | `node1 NotReady since 08:00:01: Kubelet stopped posting node status` |
 | `Switching` | controller | `egressgateway-ha.spidernet.io/active-node` label 还没有打在 `spec.activeNode` 节点上，正在切换 | `WaitingForGateway`、`EgressIPConflict`、`NoAvailableCandidate`、`TargetUnavailable`、`Completed` | `switching node1 -> node2: waiting for egress IPs on node2` |
-| `GatewayReady` | 主网关的 agent | 所有出口 IP 都已经配置到主网关的网卡上 | `EgressIPsConfigured`、`EgressIPConflict`、`InterfaceNotFound`、`ConfigureFailed` | `192.168.10.100 is answered by aa:bb:cc:dd:ee:ff, not added` |
+| `GatewayReady` | 主网关的 agent | 所有出口 IP 都已经配置到主网关的网卡上 | `EgressIPsConfigured`、`NoManagedPolicy`（没有被管理的 policy 使用出口 IP，status 为 True）、`EgressIPConflict`、`InterfaceNotFound`、`ConfigureFailed` | `192.168.10.100 is answered by aa:bb:cc:dd:ee:ff, not added` |
 | `Ready` | controller | 汇总状态，用于 `kubectl wait --for=condition=Ready` 和 ArgoCD 健康检查 | `AsExpected`，或者第一个异常 condition 的 type | `ActiveNodeReachable: 3/3 probes to 172.18.0.3:10250 failed` |
 
 - `Ready=True` 的条件：`ActiveNodeElected`、`ActiveNodeReachable`、`ActiveNodeReady`、`GatewayReady` 都为 True，并且 `Switching=False`。不满足时，reason 取第一个异常的 condition，检查顺序为 `ActiveNodeElected`、`Switching`、`ActiveNodeReachable`、`ActiveNodeReady`、`GatewayReady`。切换期间 reason 是 `Switching`，可以直接看到切换停在哪一步。
@@ -190,7 +190,7 @@ agent 持续 watch `EgressGatewayHA` 和被管理的 policy，并每 `reconcileI
    - 没有回应：以 /32 添加到 `spec.interface`，然后发送 GARP。
    - 已经在网卡上的出口 IP 不再做重复地址检测，例如升级前留下的 IP。
 2. 新增了出口 IP 时，patch 本节点 CiliumNode 的 annotation（`egressgateway-ha.spidernet.io/egress-ip-synced=<timestamp>`），触发 Cilium 重新查找 egressIP（见 [Cilium 行为分析](cilium-behavior.md) 第 3 节）。
-3. 更新 status：`status.activeNode.name` 为本节点，`egressIPs` 为已配置的 IP；所有 IP 都已配置时，`ready: true`，`GatewayReady=True`。出口网卡不存在或无法自动选择时，`GatewayReady=False`，reason 为 `InterfaceNotFound`；添加 IP 等操作失败时，reason 为 `ConfigureFailed`。只在状态变化时更新。
+3. 更新 status：`status.activeNode.name` 为本节点，`egressIPs` 为已配置的 IP；所有 IP 都已配置时，`ready: true`，`GatewayReady=True`。没有被管理的 policy 使用出口 IP 时，不配置任何 IP，`GatewayReady=True`，reason 为 `NoManagedPolicy`；主网关仍然照常选出和切换，policy 创建后可以立即生效。出口网卡不存在或无法自动选择时，`GatewayReady=False`，reason 为 `InterfaceNotFound`；添加 IP 等操作失败时，reason 为 `ConfigureFailed`。只在状态变化时更新。
 4. 如果 `garpInterval > 0`，按间隔重发 GARP。
 
 另外删除其他网卡上被管理的出口 IP，例如修改 `spec.interface` 后旧网卡上留下的 IP。

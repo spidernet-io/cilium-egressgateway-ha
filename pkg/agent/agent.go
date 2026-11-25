@@ -344,6 +344,9 @@ func (r *Reconciler) configure(ctx context.Context, egw *v1alpha1.EgressGatewayH
 		cond = r.condition(egw, metav1.ConditionFalse, v1alpha1.ReasonEgressIPConflict, strings.Join(conflicts, "; "))
 	case len(failures) > 0:
 		cond = r.condition(egw, metav1.ConditionFalse, v1alpha1.ReasonConfigureFailed, strings.Join(failures, "; "))
+	case len(desired) == 0:
+		cond = r.condition(egw, metav1.ConditionTrue, v1alpha1.ReasonNoManagedPolicy,
+			fmt.Sprintf("no managed CiliumEgressGatewayPolicy uses an egress IP, nothing to configure on %s of %s", ifaceDesc, r.Config.NodeName))
 	default:
 		cond = r.condition(egw, metav1.ConditionTrue, v1alpha1.ReasonEgressIPsConfigured,
 			fmt.Sprintf("%d egress IP(s) configured on %s of %s", len(configured), ifaceDesc, r.Config.NodeName))

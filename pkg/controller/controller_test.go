@@ -312,6 +312,14 @@ func steadyEnv(t *testing.T, active string, nodes ...testNode) *env {
 	return e
 }
 
+func TestReadyWithoutManagedPolicy(t *testing.T) {
+	e := steadyEnv(t, "n1", healthy("n1"), healthy("n2"))
+	e.agentReports("n1", true, v1alpha1.ReasonNoManagedPolicy, "nothing to configure")
+	e.reconcile()
+	e.expectCond(v1alpha1.ConditionReady, metav1.ConditionTrue, v1alpha1.ReasonAsExpected,
+		"n1 is the active node; no managed CiliumEgressGatewayPolicy uses an egress IP yet")
+}
+
 func TestNext(t *testing.T) {
 	s := newSnapshot(labels.Everything(), activeLabel, nil, nil, nil, nil)
 	for _, n := range []string{"n1", "n2", "n3", "n4"} {

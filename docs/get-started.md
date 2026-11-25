@@ -132,7 +132,7 @@ default   egw-e2e-worker2   True        True    21s
 - `REACHABLE`：主网关的 TCP 探测结果。
 - `READY`：主网关正常，并且出口 IP 已经配置好。
 
-此时还没有被管理的 policy，所以主网关上还没有配置出口 IP。
+此时还没有被管理的 policy，所以主网关上还没有配置出口 IP，`GatewayReady` 的 reason 为 `NoManagedPolicy`。主网关会提前选出，这样 policy 创建后马上就有网关可用；否则在选主完成前，Cilium 找不到网关，会丢弃 Pod 的出口流量。
 
 ## 5. 创建 egress policy
 
