@@ -69,8 +69,8 @@ var _ = Describe("Failover", Ordered, Label("disruptive"), func() {
 		WaitSteady(c, active)
 		egw, err := GetEGWHA(c)
 		Expect(err).NotTo(HaveOccurred())
-		for _, cand := range egw.Status.Candidates {
-			Expect(cand.Reachable).To(BeTrue(), "status.candidates: %+v", egw.Status.Candidates)
+		for _, cand := range egw.Status.EgressNodes {
+			Expect(cand.Reachable).To(BeTrue(), "status.egressNodes: %+v", egw.Status.EgressNodes)
 		}
 	})
 })

@@ -14,7 +14,7 @@ const namespace = "egressgateway_ha"
 var (
 	SwitchesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace, Name: "switches_total",
-		Help: "Started switches of the active node, by reason (Initial, Failover, Manual, CandidateRemoved).",
+		Help: "Started switches of the active node, by reason (Initial, Failover, Manual, EgressNodeRemoved).",
 	}, []string{"reason"})
 
 	ActiveNode = prometheus.NewGaugeVec(prometheus.GaugeOpts{
@@ -27,14 +27,14 @@ var (
 		Help: "1 for the current status and reason of each EgressGatewayHA condition.",
 	}, []string{"type", "status", "reason"})
 
-	CandidateReachable = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Namespace: namespace, Name: "candidate_reachable",
-		Help: "1 when the last TCP probe of the candidate node succeeded.",
+	EgressNodeReachable = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace, Name: "egress_node_reachable",
+		Help: "1 when the last TCP probe of the egress node succeeded.",
 	}, []string{"node"})
 
-	CandidateAvailable = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Namespace: namespace, Name: "candidate_available",
-		Help: "1 when the candidate node can become the active node.",
+	EgressNodeAvailable = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace, Name: "egress_node_available",
+		Help: "1 when the egress node can become the active node.",
 	}, []string{"node"})
 
 	ActiveNodeComponentReady = prometheus.NewGaugeVec(prometheus.GaugeOpts{
@@ -57,8 +57,8 @@ var (
 )
 
 func RegisterController() {
-	ctrlmetrics.Registry.MustRegister(SwitchesTotal, ActiveNode, Condition, CandidateReachable,
-		CandidateAvailable, ActiveNodeComponentReady)
+	ctrlmetrics.Registry.MustRegister(SwitchesTotal, ActiveNode, Condition, EgressNodeReachable,
+		EgressNodeAvailable, ActiveNodeComponentReady)
 }
 
 func RegisterAgent() {

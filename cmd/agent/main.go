@@ -84,7 +84,7 @@ func main() {
 	}
 
 	// Egress IPs are kept on exit so that upgrades do not affect traffic,
-	// unless this node is no longer a candidate nor the active node.
+	// unless this node is no longer an egress node nor the active node.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := r.CleanupOnExit(ctx, mgr.GetAPIReader()); err != nil {

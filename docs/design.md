@@ -40,9 +40,9 @@ Cilium 社区版的 Egress Gateway 可以把匹配的 Pod 流量转发到网关�
 | 名称 | 形式 | 作用 |
 |---|---|---|
 | controller | Deployment，2 副本，运行在 master 节点上，用 Lease 选出一个工作实例 | 决定哪个节点是主网关；探测主网关；执行切换；维护 `egressgateway-ha.spidernet.io/active-node` label；提供 admission webhook |
-| agent | DaemonSet，运行在候选节点上，`hostNetwork: true` | 本节点是主网关时，把出口 IP 配到网卡上，并上报状态；不是主网关时，删除出口 IP |
-| `EgressGatewayHA` | 集群级 CR，全局只有一个，名字固定为 `default` | spec：候选节点、网卡、出口 IP、当前主网关 `activeNode`。status：切换进度和各节点状态 |
-| `egressgateway-ha.spidernet.io/candidate-node=true` | Node 上的 label，运维打上 | 标记出口节点（候选网关节点）。是 Helm value `global.egressNodeSelector` 的默认值，也可以改用其他 selector |
+| agent | DaemonSet，运行在出口节点上，`hostNetwork: true` | 本节点是主网关时，把出口 IP 配到网卡上，并上报状态；不是主网关时，删除出口 IP |
+| `EgressGatewayHA` | 集群级 CR，全局只有一个，名字固定为 `default` | spec：出口节点 selector、网卡、出口 IP、当前主网关 `activeNode`。status：切换进度和各节点状态 |
+| `egressgateway-ha.spidernet.io/egress-node=true` | Node 上的 label，运维打上 | 标记出口节点，即可以成为主网关的节点。是 Helm value `global.egressNodeSelector` 的默认值，也可以改用其他 selector |
 | `egressgateway-ha.spidernet.io/active-node=true` | Node 和 CiliumNode 上的 label | 只打在主网关上。policy 的 nodeSelector 匹配这个 label，所以 Cilium 选中的网关一定是主网关 |
 
 controller 只负责做决定，agent 只负责执行。
@@ -126,7 +126,7 @@ controller 的工作实例持续检查主网关，满足以下**任意一个**�
 
 ### 4.1 选择新主网关
 
-可用的候选节点必须匹配 `egressNodeSelector`，并满足以下条件。条件分为基础条件和可选条件，各自对"触发切换"和"选择新主网关"的作用不同：
+可用的出口节点必须匹配 `egressNodeSelector`，并满足以下条件。条件分为基础条件和可选条件，各自对"触发切换"和"选择新主网关"的作用不同：
 
 | 条件 | 层级 | 触发切换 | 选择新主网关 |
 |---|---|---|---|
@@ -143,12 +143,12 @@ controller 的工作实例持续检查主网关，满足以下**任意一个**�
 | 触发原因 | 选择规则 |
 |---|---|
 | 初次部署（`spec.activeNode` 为空） | 字典序第一个 |
-| 故障切换，或主网关不再是候选节点 | 按字典序排列可用节点，选排在当前主网关之后的下一个；当前主网关已经排在最后时，回到第一个 |
+| 故障切换，或主网关不再是出口节点 | 按字典序排列可用节点，选排在当前主网关之后的下一个；当前主网关已经排在最后时，回到第一个 |
 | 手动切换 | 运维指定的节点 |
 
-例如候选节点为 node1、node2、node3，当前主网关是 node2：node2 故障时选 node3；node3 也不可用时选 node1。
+例如出口节点为 node1、node2、node3，当前主网关是 node2：node2 故障时选 node3；node3 也不可用时选 node1。
 
-没有可用节点时保持现状，`Switching` condition 的 reason 为 `NoAvailableCandidate`。
+没有可用节点时保持现状，`Switching` condition 的 reason 为 `NoAvailableEgressNode`。
 
 ### 4.2 两阶段切换
 
@@ -183,7 +183,7 @@ controller 在切换中途重启时，新实例比较 `spec.activeNode`、label 
 kubectl patch egressgatewayha default --type merge -p '{"spec":{"activeNode":"node1"}}'
 ```
 
-- webhook 校验目标节点存在，并且是候选节点。
+- webhook 校验目标节点存在，并且是出口节点。
 - 之后按 4.2 的两阶段流程切换。
 - 目标节点不可用时，controller 把 `spec.activeNode` 恢复为当前带 label 的节点，并记录 Warning Event，reason 为 `TargetUnavailable`。
 
@@ -222,7 +222,7 @@ kubectl patch egressgatewayha default --type merge -p '{"spec":{"activeNode":"no
 
 - **启动**：本节点是主网关时，确保出口 IP 存在，**不先删除**，直接沿用升级前留下的出口 IP；不是主网关时，删除本机的出口 IP。无法访问 API Server 时，保持网卡现状不变。
 - **运行中**：watch `EgressGatewayHA` 和 policy，并每 10s reconcile 一次。出口 IP 被其他组件删除时，会重新添加。
-- **退出（SIGTERM）**：不删除出口 IP，也不修改 label，所以 agent 升级不影响出口流量。例外：本节点已经不是候选节点时，删除出口 IP（即使它仍是主网关，controller 也会把它切走）。
+- **退出（SIGTERM）**：不删除出口 IP，也不修改 label，所以 agent 升级不影响出口流量。例外：本节点已经不是出口节点时，删除出口 IP（即使它仍是主网关，controller 也会把它切走）。
 
 agent 的详细流程见[设计细节](reference/design-details.md)第 3 章。
 
@@ -272,7 +272,7 @@ webhook 的完整规则见[设计细节](reference/design-details.md)第 4 章�
 global:
   egressNodeSelector:               # 出口节点：agent DaemonSet 的调度范围，以及创建 CR 时的 spec.egressNodeSelector
     matchLabels:
-      egressgateway-ha.spidernet.io/candidate-node: "true"
+      egressgateway-ha.spidernet.io/egress-node: "true"
   activeNodeLabel:                  # 主网关 label，只在安装时设置，见 2.1
     key: egressgateway-ha.spidernet.io/active-node
     value: "true"
@@ -349,8 +349,8 @@ controller 和 agent 还提供 Prometheus metrics，并在 `EgressGatewayHA` 和
   - 中间防火墙代替节点回 RST 时，节点宕机后探测仍然被判定为存活，故障检测不到。
   - 节点本机防火墙的 REJECT 没有问题，因为能回 RST 本身就说明节点还活着。
 - **出口网卡和探测网卡不同**：探测的是 InternalIP 所在的网卡。如果出口 IP 配在另一块网卡上，出口网卡断开时不会触发切换。这种部署需要另外监控出口网卡的链路状态。
-- **新节点的 agent 不可用时无法切换**：所以选择新主网关时会检查 agent Pod 是否 Ready。生产环境建议至少部署 3 个候选节点。
-- **把主网关移出候选节点时，需要有其他可用的候选节点**：DaemonSet 会删除这个节点上的 agent，agent 退出时删除出口 IP。有其他可用节点时，controller 以 `CandidateRemoved` 切换过去；没有可用节点时不切换，`Switching` 的 reason 为 `NoAvailableCandidate`，label 仍然在这个节点上，但出口 IP 已经被删除，上游 ARP 缓存过期后出口流量中断。移出候选节点前，先确认还有其他可用的候选节点。
+- **新节点的 agent 不可用时无法切换**：所以选择新主网关时会检查 agent Pod 是否 Ready。生产环境建议至少部署 3 个出口节点。
+- **把主网关移出出口节点时，需要有其他可用的出口节点**：DaemonSet 会删除这个节点上的 agent，agent 退出时删除出口 IP。有其他可用节点时，controller 以 `EgressNodeRemoved` 切换过去；没有可用节点时不切换，`Switching` 的 reason 为 `NoAvailableEgressNode`，label 仍然在这个节点上，但出口 IP 已经被删除，上游 ARP 缓存过期后出口流量中断。移出出口节点前，先确认还有其他可用的出口节点。
 - **GitOps**：controller 会修改 `spec.activeNode`。用 ArgoCD、Flux 管理 `EgressGatewayHA` 时，需要忽略这个字段，否则会被改回去，触发一次切换。
 - **GARP**：上游交换机或路由器必须接受 GARP，并及时更新 ARP 表。
 - **外部组件冲突**：节点上的网络管理组件可能会删除出口 IP。agent 会定期 reconcile 恢复，但仍然要避免这类组件管理该网卡。

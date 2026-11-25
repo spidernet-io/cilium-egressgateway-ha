@@ -84,7 +84,7 @@ type ClientStatusWriter struct {
 	Client client.Client
 }
 
-func (w *ClientStatusWriter) Apply(ctx context.Context, conds []metav1.Condition, candidates []v1alpha1.CandidateStatus) error {
+func (w *ClientStatusWriter) Apply(ctx context.Context, conds []metav1.Condition, nodes []v1alpha1.EgressNodeStatus) error {
 	list := make([]any, 0, len(conds))
 	for _, c := range conds {
 		list = append(list, map[string]any{
@@ -102,12 +102,17 @@ func (w *ClientStatusWriter) Apply(ctx context.Context, conds []metav1.Condition
 		"metadata":   map[string]any{"name": v1alpha1.SingletonName},
 		"status":     map[string]any{"conditions": list},
 	}}
-	if len(candidates) > 0 {
-		cl := make([]any, 0, len(candidates))
-		for _, c := range candidates {
-			cl = append(cl, map[string]any{"name": c.Name, "reachable": c.Reachable})
+	if len(nodes) > 0 {
+		cl := make([]any, 0, len(nodes))
+		for _, c := range nodes {
+			m := map[string]any{"name": c.Name, "reachable": c.Reachable,
+				"lastTransitionTime": c.LastTransitionTime.UTC().Format(time.RFC3339)}
+			if c.Message != "" {
+				m["message"] = c.Message
+			}
+			cl = append(cl, m)
 		}
-		u.Object["status"].(map[string]any)["candidates"] = cl
+		u.Object["status"].(map[string]any)["egressNodes"] = cl
 	}
 	return w.Client.Status().Apply(ctx, client.ApplyConfigurationFromUnstructured(u),
 		client.FieldOwner(FieldManager), client.ForceOwnership)

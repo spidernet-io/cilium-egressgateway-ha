@@ -156,23 +156,6 @@ spec:
                 - name
                 - ready
                 type: object
-              candidates:
-                items:
-                  description: CandidateStatus is the TCP probe result of a candidate
-                    node.
-                  properties:
-                    name:
-                      type: string
-                    reachable:
-                      type: boolean
-                  required:
-                  - name
-                  - reachable
-                  type: object
-                type: array
-                x-kubernetes-list-map-keys:
-                - name
-                x-kubernetes-list-type: map
               conditions:
                 items:
                   description: Condition contains details for one aspect of the current
@@ -231,6 +214,32 @@ spec:
                 type: array
                 x-kubernetes-list-map-keys:
                 - type
+                x-kubernetes-list-type: map
+              egressNodes:
+                items:
+                  description: EgressNodeStatus is the TCP probe result of an egress
+                    node.
+                  properties:
+                    lastTransitionTime:
+                      description: LastTransitionTime is when Reachable last changed.
+                      format: date-time
+                      type: string
+                    message:
+                      description: Message is the last probe error, empty when the
+                        node is reachable.
+                      type: string
+                    name:
+                      type: string
+                    reachable:
+                      type: boolean
+                  required:
+                  - lastTransitionTime
+                  - name
+                  - reachable
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
                 x-kubernetes-list-type: map
             type: object
         required:

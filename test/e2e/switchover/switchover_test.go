@@ -32,7 +32,7 @@ var _ = Describe("Switchover", Ordered, func() {
 		DeferCleanup(func() {
 			_, _ = Command("docker", "exec", E.ClientNode, "ip", "addr", "del", E.EgressIP()+"/32", "dev", "eth0")
 			for _, n := range E.EgressNodes() {
-				_, _ = Command("kubectl", "label", "node", n, CandidateLabel+"=true", "--overwrite")
+				_, _ = Command("kubectl", "label", "node", n, EgressNodeLabel+"=true", "--overwrite")
 			}
 		})
 	})
@@ -100,12 +100,12 @@ var _ = Describe("Switchover", Ordered, func() {
 
 	It("switches away when the active node is no longer an egress node", func() {
 		removed, want := active, next(active)
-		Kubectl("label", "node", removed, CandidateLabel+"-")
+		Kubectl("label", "node", removed, EgressNodeLabel+"-")
 		active = WaitSteady(c, want)
-		ExpectElected(c, v1alpha1.ReasonCandidateRemoved, removed+" no longer matches egressNodeSelector")
+		ExpectElected(c, v1alpha1.ReasonEgressNodeRemoved, removed+" no longer matches egressNodeSelector")
 		WaitSourceIP(E.EgressIP())
 
-		Kubectl("label", "node", removed, CandidateLabel+"=true")
+		Kubectl("label", "node", removed, EgressNodeLabel+"=true")
 		WaitUsable(c, removed)
 		WaitSteady(c, active)
 	})

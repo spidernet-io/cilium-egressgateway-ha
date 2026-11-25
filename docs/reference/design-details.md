@@ -14,9 +14,9 @@ kind: EgressGatewayHA
 metadata:
   name: default                     # 全局只有一个实例，名字固定为 default
 spec:
-  egressNodeSelector:               # 出口节点，即候选网关节点
+  egressNodeSelector:               # 出口节点，即可以成为主网关的节点
     matchLabels:
-      egressgateway-ha.spidernet.io/candidate-node: "true"
+      egressgateway-ha.spidernet.io/egress-node: "true"
   interface: eth0                   # 可选。agent 把出口 IP 配到这块网卡上，不填时自动选择。不会写入 policy
   egressIPs:                        # 允许使用的出口 IP，支持单个 IP 和地址范围
   - 192.168.10.100-192.168.10.110
@@ -28,11 +28,14 @@ status:
     name: node1
     egressIPs: [192.168.10.100]     # 已经配置到网卡上的出口 IP
     ready: true                     # 所有出口 IP 都已经配置
-  candidates:                       # 各候选节点的 TCP 探测结果（controller 写）
+  egressNodes:                      # 各出口节点的 TCP 探测结果（controller 写）
   - name: node1
     reachable: true
+    lastTransitionTime: "2026-11-25T08:15:40Z"   # reachable 最近一次变化的时间
   - name: node2
-    reachable: true
+    reachable: false
+    lastTransitionTime: "2026-11-25T09:30:12Z"
+    message: "probe to 192.168.10.12:10250 failed: i/o timeout"   # 最近一次探测失败的原因，可达时为空
   conditions: [...]                 # 见 1.3
 ```
 
@@ -54,10 +57,10 @@ status:
 
 | type | 写入方 | 含义 | reason | message 示例 |
 |---|---|---|---|---|
-| `ActiveNodeElected` | controller | 已经选出主网关，并且 label 已经在这个节点上 | `Initial`（初次部署）、`Failover`（故障切换）、`Manual`（运维修改）、`CandidateRemoved`（原主网关不再是候选节点） | `node2 became active node, failover from node1: probe failed` |
+| `ActiveNodeElected` | controller | 已经选出主网关，并且 label 已经在这个节点上 | `Initial`（初次部署）、`Failover`（故障切换）、`Manual`（运维修改）、`EgressNodeRemoved`（原主网关不再是出口节点） | `node2 became active node, failover from node1: probe failed` |
 | `ActiveNodeReachable` | controller | 主网关的 TCP 探测结果 | `ProbeSucceeded`、`ProbeFailed`；还没有探测结果时为 `Probing`，没有主网关时为 `NoActiveNode`（status 都为 Unknown） | `3/3 probes to 172.18.0.3:10250 failed: i/o timeout` |
 | `ActiveNodeReady` | controller | 主网关 Node 的 Ready 状态 | 沿用 Node Ready condition 的 reason，例如 `KubeletReady`、`NodeStatusUnknown`；Node 不存在时为 `NodeNotFound`；还没有主网关时为 `NoActiveNode`（status 为 Unknown） | `node1 NotReady since 08:00:01: Kubelet stopped posting node status` |
-| `Switching` | controller | `egressgateway-ha.spidernet.io/active-node` label 还没有打在 `spec.activeNode` 节点上，正在切换 | `WaitingForGateway`、`EgressIPConflict`、`NoAvailableCandidate`、`TargetUnavailable`、`Completed` | `switching node1 -> node2: waiting for egress IPs on node2` |
+| `Switching` | controller | `egressgateway-ha.spidernet.io/active-node` label 还没有打在 `spec.activeNode` 节点上，正在切换 | `WaitingForGateway`、`EgressIPConflict`、`NoAvailableEgressNode`、`TargetUnavailable`、`Completed` | `switching node1 -> node2: waiting for egress IPs on node2` |
 | `GatewayReady` | 主网关的 agent | 所有出口 IP 都已经配置到主网关的网卡上 | `EgressIPsConfigured`、`NoManagedPolicy`（没有被管理的 policy 使用出口 IP，status 为 True）、`EgressIPConflict`、`InterfaceNotFound`、`ConfigureFailed` | `192.168.10.100 is answered by aa:bb:cc:dd:ee:ff, not added` |
 | `Ready` | controller | 汇总状态，用于 `kubectl wait --for=condition=Ready` 和 ArgoCD 健康检查 | `AsExpected`，或者第一个异常 condition 的 type | `ActiveNodeReachable: 3/3 probes to 172.18.0.3:10250 failed` |
 
@@ -67,7 +70,7 @@ status:
 - `Switching` 的 reason：
   - `WaitingForGateway`：已经写入 `spec.activeNode`，等待新节点配好出口 IP。
   - `EgressIPConflict`：新节点的重复地址检测发现冲突。
-  - `NoAvailableCandidate`：没有可用的候选节点。
+  - `NoAvailableEgressNode`：没有可用的出口节点。
   - `TargetUnavailable`：运维指定的目标节点不可用，`spec.activeNode` 已经被恢复。
   - `Completed`：切换完成，`Switching=False`，message 写明从哪个节点切到哪个节点。
 
@@ -77,16 +80,16 @@ status:
 - 只有 `spec.activeNode` 节点上的 agent 写 status，备节点的 agent 不写，所以同一时刻只有一个 agent 写。
 - 两方都用 Server-Side Apply 更新 status，使用不同的 field manager，各自只管理自己的字段。conditions 声明为 `listType=map`、`listMapKey=type`，所以按 condition 类型分属不同的 field manager，不会互相覆盖。切换主网关时，新主网关的 agent 用 force apply 接管 `status.activeNode` 和 `GatewayReady`。
 - 切换过程中，新节点的 agent 写入之前，`status.activeNode` 仍然是旧主网关留下的内容。所以 controller 只有在 `status.activeNode.name` 等于 `spec.activeNode` 时，才认为它有效。
-- `candidates` 只记录 TCP 探测结果。选择新主网关时用到的 Node Ready、cilium-agent 和 agent Pod 的就绪状态，controller 直接从 Node 和 Pod 对象读取，不写进 status。
-- controller 每次 reconcile 都直接从 API Server 读取 `EgressGatewayHA`，以及带 `egressgateway-ha.spidernet.io/active-node` label 的 Node 和 CiliumNode（按 label selector 过滤，对象很少），不使用 informer 缓存。刚写完 status 或 label 后，缓存可能还是旧的；用旧数据计算 conditions 并写回，会覆盖刚写入的结果，或者把 controller 自己移动的 label 误判为手动切换。其他信息（Node Ready、候选 label、Pod 就绪状态）仍然从缓存读取，短暂过期只会推迟判断。
+- `egressNodes` 只记录 TCP 探测结果，并且只在 `reachable` 变化（或失败原因变化）时更新，不记录每次探测的时间，避免每个探测周期都写一次 status。message 不带连续失败次数，原因同上；次数见 `ActiveNodeReachable` condition。选择新主网关时用到的 Node Ready、cilium-agent 和 agent Pod 的就绪状态，controller 直接从 Node 和 Pod 对象读取，不写进 status。
+- controller 每次 reconcile 都直接从 API Server 读取 `EgressGatewayHA`，以及带 `egressgateway-ha.spidernet.io/active-node` label 的 Node 和 CiliumNode（按 label selector 过滤，对象很少），不使用 informer 缓存。刚写完 status 或 label 后，缓存可能还是旧的；用旧数据计算 conditions 并写回，会覆盖刚写入的结果，或者把 controller 自己移动的 label 误判为手动切换。其他信息（Node Ready、出口节点 label、Pod 就绪状态）仍然从缓存读取，短暂过期只会推迟判断。
 
 ## 2. 节点故障探测
 
 ### 2.1 TCP 探测
 
-controller 向节点的 InternalIP 发起 TCP 连接，目标端口为 `egressNodeProbe.port`（默认 10250，kubelet 端口），超时 `egressNodeProbe.timeout`（默认 2s）。controller 对所有候选节点都执行探测，结果写入 `status.candidates[].reachable`。
+controller 向节点的 InternalIP 发起 TCP 连接，目标端口为 `egressNodeProbe.port`（默认 10250，kubelet 端口），超时 `egressNodeProbe.timeout`（默认 2s）。controller 对所有出口节点都执行探测，结果写入 `status.egressNodes[].reachable`。
 
-TCP 探测可以用 `controller.egressNodeProbe.enabled` 关闭，影响见[设计文档](../design.md) 4.1 节。关闭后 controller 不再探测，`status.candidates` 和 `ActiveNodeReachable` condition 也会从 status 中删除。
+TCP 探测可以用 `controller.egressNodeProbe.enabled` 关闭，影响见[设计文档](../design.md) 4.1 节。关闭后 controller 不再探测，`status.egressNodes` 和 `ActiveNodeReachable` condition 也会从 status 中删除。
 
 探测是**串行**的：上一次探测结束（成功、被拒绝或超时）后，等待 `egressNodeProbe.interval`（默认 5s）再发起下一次。所以同一个节点不会同时有两个探测，timeout 也可以大于 interval。
 
@@ -111,14 +114,14 @@ TCP 探测可以用 `controller.egressNodeProbe.enabled` 关闭，影响见[设�
 
 实现时必须按错误码区分，**只有 `ECONNREFUSED` 视为存活**，不能把所有"立即返回的错误"都当作存活。
 
-探测只有 controller 一个观察点。为了避免 controller 所在节点自己的网络问题被误判为主网关故障，因 TCP 探测失败而切换前，还要确认至少有一个备选节点 TCP 探测成功。如果所有候选节点都探测失败，判定为 controller 自己的网络问题，不切换，只告警：`Switching` 的 reason 为 `NoAvailableCandidate`，message 写明其他候选节点也都不可达，并记录 Warning Event。
+探测只有 controller 一个观察点。为了避免 controller 所在节点自己的网络问题被误判为主网关故障，因 TCP 探测失败而切换前，还要确认至少有一个备选节点 TCP 探测成功。如果所有出口节点都探测失败，判定为 controller 自己的网络问题，不切换，只告警：`Switching` 的 reason 为 `NoAvailableEgressNode`，message 写明其他出口节点也都不可达，并记录 Warning Event。
 
 实现细节：
 
-- 探测目标是所有候选节点，以及当前主网关（即使它已经不是候选节点），地址是 Node 的第一个 IPv4 InternalIP。没有 IPv4 InternalIP 的节点不能被选为主网关。
+- 探测目标是所有出口节点，以及当前主网关（即使它已经不是出口节点），地址是 Node 的第一个 IPv4 InternalIP。没有 IPv4 InternalIP 的节点不能被选为主网关。
 - 只有 Lease 选出的工作实例会探测。探测结果变化时（第一次有结果、成功和失败互相转换、连续失败次数变化），立即触发一次 reconcile。
 - 选择新主网关时，要求节点**最近一次**探测成功；判定主网关故障时，要求**连续失败达到** `failureThreshold`。所以只失败过 1、2 次的节点不会被选为新主网关，但如果它是主网关，也不会因此被切走。
-- `status.candidates` 中，还没有探测结果的节点 `reachable` 为 false。
+- `status.egressNodes` 中，还没有探测结果的节点 `reachable` 为 false。
 - controller 重启或者工作实例切换后，在第一次探测完成之前，保留原来的 `ActiveNodeReachable`，避免 `Ready` 短暂变为 False。
 
 ### 2.2 为什么用 TCP 连接
@@ -200,7 +203,7 @@ agent 持续 watch `EgressGatewayHA` 和被管理的 policy，并每 `reconcileI
 ### 3.3 退出（SIGTERM）
 
 - **不删除出口 IP**，也不修改任何 label。Pod 升级、驱逐期间，出口 IP 和 Cilium 的 BPF 配置保持不变，出口流量不受影响。新 Pod 启动后按 3.1 沿用已有 IP。
-- 例外：如果本节点已经不匹配 `egressNodeSelector`（节点退出候选），就删除出口 IP。DaemonSet 在节点不再匹配时会删除 agent Pod，所以这种情况会走到这里。即使本节点仍然是 `spec.activeNode` 也删除：controller 会因为 `CandidateRemoved` 把主网关切走，而这个节点上已经没有 agent，留下的出口 IP 会让新主网关的重复地址检测一直失败。
+- 例外：如果本节点已经不匹配 `egressNodeSelector`（节点不再是出口节点），就删除出口 IP。DaemonSet 在节点不再匹配时会删除 agent Pod，所以这种情况会走到这里。即使本节点仍然是 `spec.activeNode` 也删除：controller 会因为 `EgressNodeRemoved` 把主网关切走，而这个节点上已经没有 agent，留下的出口 IP 会让新主网关的重复地址检测一直失败。
 
 ## 4. Webhook
 
@@ -253,7 +256,7 @@ controller 的两个副本都提供 webhook 服务，不依赖工作实例。
 - 名字必须是 `default`（CRD schema 中的 CEL 规则，不依赖 webhook）。
 - `egressIPs` 中每一项都是合法的 IPv4 地址或地址范围（`起始IP-结束IP`）。`defaultEgressIP` 如果填写，必须在 `egressIPs` 中。
 - `spec.activeNode` 非空并且被修改时，节点必须存在，并且匹配 `egressNodeSelector`。只在修改时检查，这样主网关的 Node 被删除后，运维仍然可以修改其他字段。
-- **controller 自己的修改不经过这个 webhook**：webhook 配置中用 `matchConditions` 排除 controller 的 ServiceAccount（`request.userInfo.username != 'system:serviceaccount:<namespace>:<controller SA>'`），API Server 不会调用 webhook。原因有两个：一是故障切换时 controller 要写 `spec.activeNode`，不能依赖 webhook 是否可用；二是 controller 回滚手动切换时，原来的节点可能已经不是候选节点，不能被拒绝。controller 写入的节点由它自己的选择规则保证。
+- **controller 自己的修改不经过这个 webhook**：webhook 配置中用 `matchConditions` 排除 controller 的 ServiceAccount（`request.userInfo.username != 'system:serviceaccount:<namespace>:<controller SA>'`），API Server 不会调用 webhook。原因有两个：一是故障切换时 controller 要写 `spec.activeNode`，不能依赖 webhook 是否可用；二是 controller 回滚手动切换时，原来的节点可能已经不是出口节点，不能被拒绝。controller 写入的节点由它自己的选择规则保证。
 - 修改 `egressIPs` 时，如果已有被管理的 policy 使用的 egressIP 不在新的列表中，拒绝修改。
 
 ### 4.5 运行时校验
@@ -285,8 +288,8 @@ admission webhook 有超时限制（默认 10s），只能做静态校验，不�
 
 ### 5.2 agent
 
-- DaemonSet，`hostNetwork: true`。调度范围通过 nodeAffinity 限制在候选节点上。
-- Helm 用同一个 value `global.egressNodeSelector` 渲染 DaemonSet 的 nodeAffinity，以及 controller 创建 `EgressGatewayHA` 时使用的 `egressNodeSelector`，所以初次部署时两者一致。CR 创建后，如果运维只修改了 CR 中的 `egressNodeSelector`，两者会不一致：匹配 selector 但没有 agent Pod 的节点会被视为不可用，不会被选为主网关；有 agent Pod 但不匹配 selector 的节点不会成为候选节点。修改候选节点时，需要同时修改 CR 和 Helm value。
+- DaemonSet，`hostNetwork: true`。调度范围通过 nodeAffinity 限制在出口节点上。
+- Helm 用同一个 value `global.egressNodeSelector` 渲染 DaemonSet 的 nodeAffinity，以及 controller 创建 `EgressGatewayHA` 时使用的 `egressNodeSelector`，所以初次部署时两者一致。CR 创建后，如果运维只修改了 CR 中的 `egressNodeSelector`，两者会不一致：匹配 selector 但没有 agent Pod 的节点会被视为不可用，不会被选为主网关；有 agent Pod 但不匹配 selector 的节点不会成为出口节点。修改出口节点时，需要同时修改 CR 和 Helm value。
 - capabilities：`NET_ADMIN`（增删 IP）、`NET_RAW`（发送 GARP、重复地址检测）。
 - `updateStrategy` 使用 `maxSurge: 0`，避免同一节点上同时有两个 agent。
 - readinessProbe：agent 连接上 API Server 并完成首次同步后才 Ready。健康检查端口使用 host 网络上的 `agent.healthPort`（默认 9790，避开 cilium-agent 占用的 9890）。controller 用 agent Pod 的 Ready 状态判断节点能否作为新主网关，不需要单独的心跳。
@@ -312,25 +315,25 @@ controller 的 metrics 在 `controller.metricsPort`（默认 8080），只有工
 
 | metric | 类型 | 含义 |
 |---|---|---|
-| `egressgateway_ha_switches_total{reason}` | counter | 开始的切换次数，reason 为 `Initial`、`Failover`、`Manual`、`CandidateRemoved` |
+| `egressgateway_ha_switches_total{reason}` | counter | 开始的切换次数，reason 为 `Initial`、`Failover`、`Manual`、`EgressNodeRemoved` |
 | `egressgateway_ha_active_node{node}` | gauge | `spec.activeNode` 对应的节点为 1 |
-| `egressgateway_ha_condition{type,status,reason}` | gauge | 每个 condition 当前的 status 和 reason 为 1，例如告警 `Switching` 的 `NoAvailableCandidate`、`GatewayReady` 的 `EgressIPConflict` |
-| `egressgateway_ha_candidate_reachable{node}` | gauge | 候选节点最近一次 TCP 探测成功为 1 |
-| `egressgateway_ha_candidate_available{node}` | gauge | 候选节点可以成为主网关为 1 |
+| `egressgateway_ha_condition{type,status,reason}` | gauge | 每个 condition 当前的 status 和 reason 为 1，例如告警 `Switching` 的 `NoAvailableEgressNode`、`GatewayReady` 的 `EgressIPConflict` |
+| `egressgateway_ha_egress_node_reachable{node}` | gauge | 出口节点最近一次 TCP 探测成功为 1 |
+| `egressgateway_ha_egress_node_available{node}` | gauge | 出口节点可以成为主网关为 1 |
 | `egressgateway_ha_active_node_component_ready{component}` | gauge | 主网关上的 `agent`、`cilium-agent` 就绪为 1，不触发切换 |
 | `egressgateway_ha_agent_egress_ip{interface,ip}` | gauge | 本节点网卡上被管理的出口 IP |
 | `egressgateway_ha_agent_dad_conflicts_total{ip}` | counter | 重复地址检测发现冲突的次数 |
 
 Event：
 
-- `EgressGatewayHA` 上：`SwitchStarted`、`SwitchCompleted`、`TargetUnavailable`、`NoAvailableCandidate`；主网关上的 agent 或 cilium-agent 变为未就绪时，记录一次 `ActiveNodeAgentNotReady`、`ActiveNodeCiliumAgentNotReady`（Warning）。
+- `EgressGatewayHA` 上：`SwitchStarted`、`SwitchCompleted`、`TargetUnavailable`、`NoAvailableEgressNode`；主网关上的 agent 或 cilium-agent 变为未就绪时，记录一次 `ActiveNodeAgentNotReady`、`ActiveNodeCiliumAgentNotReady`（Warning）。
 - 被管理的 policy 上：`Ready` 变为 False，或者 False 的 reason 变化时，在每个被管理的 policy 上记录一次 Warning Event `EgressGatewayNotReady`，note 中写明 `Ready` 的 reason 和 message。用户查看自己的 policy 时就能看到出口 IP 冲突、没有可用的主网关等问题。
 
 ### 5.5 卸载
 
 `helm uninstall` 只删除 controller、agent 和 webhook，不影响出口流量：
 
-- agent 退出时节点仍然是候选节点，所以保留出口 IP；`egressgateway-ha.spidernet.io/active-node` label 也留在主网关上。
+- agent 退出时节点仍然是出口节点，所以保留出口 IP；`egressgateway-ha.spidernet.io/active-node` label 也留在主网关上。
 - `EgressGatewayHA default`、证书 Secret、Lease 由 controller 创建，CRD 在 chart 的 `crds/` 目录中，都不会被删除。重新安装时沿用已有的 `EgressGatewayHA`。
 - 彻底清理时，先删除被管理的 policy 和 `EgressGatewayHA default`，再删除主网关上的 label 和地址 label 为 `<网卡>:egw` 的出口 IP。
 
@@ -338,7 +341,7 @@ Event：
 
 | label | 默认值 | 打在哪里 | 由谁维护 | 用途 |
 |---|---|---|---|---|
-| 出口节点 label | `egressgateway-ha.spidernet.io/candidate-node=true` | 所有出口节点 | 运维 | `global.egressNodeSelector` 的默认值：agent DaemonSet 的调度范围，以及 CR 的 `spec.egressNodeSelector` |
+| 出口节点 label | `egressgateway-ha.spidernet.io/egress-node=true` | 所有出口节点 | 运维 | `global.egressNodeSelector` 的默认值：agent DaemonSet 的调度范围，以及 CR 的 `spec.egressNodeSelector` |
 | 主网关 label | `egressgateway-ha.spidernet.io/active-node=true` | Node 和 CiliumNode，同一时刻只有主网关 | controller | 被管理的 policy 用它作为 nodeSelector，Cilium 据此选择网关；本项目据此识别被管理的 policy |
 
 出口节点 label 只是 selector 的默认值，可以改用节点上已有的 label，例如机房或角色。
@@ -358,11 +361,11 @@ Event：
 
 - **只按节点本身的状态切换。** controller 用 TCP 探测和 Node Ready 状态判断主网关是否故障，不用"本项目进程是否存活"来代表节点能否转发。
 - **agent 只执行，不做决定。** agent 重启或升级时不删除出口 IP，已经生效的数据面保持不变。
-- **只有一个地方做决定。** 决策集中在 controller 的工作实例上，候选节点之间不需要互斥，也不会出现多个节点各自判断后同时接管。
+- **只有一个地方做决定。** 决策集中在 controller 的工作实例上，出口节点之间不需要互斥，也不会出现多个节点各自判断后同时接管。
 
 ### 6.2 为什么不使用多节点匹配
 
-多节点匹配方案的做法是：policy 的 nodeSelector 只匹配候选节点，Cilium 按节点名排序后选第一个作为主节点。主节点故障时，由某个组件删除它的 label，Cilium 就会选择下一个节点。
+多节点匹配方案的做法是：policy 的 nodeSelector 只匹配出口节点，Cilium 按节点名排序后选第一个作为主节点。主节点故障时，由某个组件删除它的 label，Cilium 就会选择下一个节点。
 
 这个方案能实现切换，但还要回答三个问题：谁来判断主节点故障？由谁来执行切换？怎样避免两个节点同时持有出口 IP？把这些问题都解决后，就需要一个统一做决定的组件。
 
@@ -372,8 +375,8 @@ Event：
 | 故障检测 | 需要备节点自己判断。如果监听 Node Ready，默认至少要 40s | controller 用 TCP 连接探测节点，约 16～21s；Node NotReady 也触发切换 |
 | 误判时是否双主 | **会。** 备节点加上出口 IP 后，旧主节点并不知道自己已被替换，还继续持有 IP，流量全部中断 | 新主节点添加 IP 前先做重复地址检测，发现冲突就不添加，也不修改 label |
 | 多个备节点之间的互斥 | 需要另外加一把锁 | 只有一个 controller 实例做决定 |
-| 故障节点恢复后 | 候选 label 已经被删除，需要运维手动加回 | 候选节点由 `egressNodeSelector` 决定，节点恢复后自动成为备节点 |
-| 是否强制切回 | **会。** 候选 label 加回后，原主节点名字排序最靠前，Cilium 立即切回，但出口 IP 还在备节点上，流量中断 | 不会。只有 `activeNode` 节点带有 active label |
+| 故障节点恢复后 | 出口节点 label 已经被删除，需要运维手动加回 | 出口节点由 `egressNodeSelector` 决定，节点恢复后自动成为备节点 |
+| 是否强制切回 | **会。** 出口节点 label 加回后，原主节点名字排序最靠前，Cilium 立即切回，但出口 IP 还在备节点上，流量中断 | 不会。只有 `activeNode` 节点带有 active label |
 
 ### 6.3 为什么不在每个节点上预先配置出口 IP
 
@@ -387,7 +390,7 @@ MetalLB L2 模式也是"一个 IP 在多个节点之间主备切换"，以下内
 | 方面 | MetalLB L2 | 本方案 |
 |---|---|---|
 | 选主方式 | **无状态、分布式**。每个 speaker 都收集同一组可用节点，按 `sha256(节点名 + "#" + IP)` 排序（可以用 `preferredNodes` 加权），排第一的节点宣告这个 IP。没有 Lease，也没有中心组件 | 中心化。controller 决定主网关并写入 `spec.activeNode`，选择结果有状态、不随节点增减而变化 |
-| 可用节点 | memberlist 中存活的 speaker，排除带 `NetworkUnavailable` 条件或 `node.kubernetes.io/exclude-from-external-load-balancers` label 的节点，再按 L2Advertisement 的节点选择器过滤 | 候选节点中：TCP 探测可达、Node Ready、cilium-agent Ready、agent Pod Ready |
+| 可用节点 | memberlist 中存活的 speaker，排除带 `NetworkUnavailable` 条件或 `node.kubernetes.io/exclude-from-external-load-balancers` label 的节点，再按 L2Advertisement 的节点选择器过滤 | 出口节点中：TCP 探测可达、Node Ready、cilium-agent Ready、agent Pod Ready |
 | 故障检测 | speaker 之间通过 memberlist（SWIM gossip）互相探测，秒级 | controller 从 master 节点用 TCP 连接探测节点，秒级 |
 | IP 如何生效 | **不把 IP 配到网卡上**。speaker 在用户态响应 ARP，并发送 GARP，转发由 kube-proxy 完成 | Cilium 要求 egressIP 属于节点（配在网卡上或作为 local route），所以必须把 IP 配到网卡上 |
 | speaker/agent 升级 | speaker 退出时调用 memberlist `Leave`，其他 speaker 立即把它移出可用列表并重新计算，**升级会触发切换** | agent 退出时保留出口 IP，升级不切换 |
@@ -408,7 +411,7 @@ MetalLB L2 模式也是"一个 IP 在多个节点之间主备切换"，以下内
 
 ## 7. 故障场景实测
 
-环境：kind（Kubernetes v1.36.1，Cilium v1.20.5，tunnel/vxlan，KPR），1 个 control-plane 和 2 个 worker 作为候选节点，client Pod 在非候选节点上。默认探测参数（2s、5s、3 次），e2e 中 agent 的 `reconcileInterval` 为 5s。测试代码在 `test/e2e/`，是按类别划分的 Ginkgo suite，每个 PR 都会在 GitHub Actions 中运行（见 README）。
+环境：kind（Kubernetes v1.36.1，Cilium v1.20.5，tunnel/vxlan，KPR），1 个 control-plane 和 2 个 worker 作为出口节点，client Pod 在非出口节点上。默认探测参数（2s、5s、3 次），e2e 中 agent 的 `reconcileInterval` 为 5s。测试代码在 `test/e2e/`，是按类别划分的 Ginkgo suite，每个 PR 都会在 GitHub Actions 中运行（见 README）。
 
 出口流量的测量方法：client Pod 内运行一个循环，每 200ms 用 `curl -m 1` 访问外部目标，记录 `/proc/uptime` 和目标看到的源 IP，结果写在 Pod 内的文件中，事后读取。这样 API Server 不可用时也能测量。"最长间隔"是两次成功请求（源 IP 为出口 IP）之间的最长时间，正常值约 0.2s。
 

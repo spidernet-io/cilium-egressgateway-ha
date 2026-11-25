@@ -63,14 +63,14 @@ func (st *state) updateMetrics() {
 		metrics.Condition.WithLabelValues(c.Type, string(c.Status), c.Reason).Set(1)
 	}
 
-	metrics.CandidateReachable.Reset()
-	metrics.CandidateAvailable.Reset()
-	for _, name := range st.snap.candidateNames() {
+	metrics.EgressNodeReachable.Reset()
+	metrics.EgressNodeAvailable.Reset()
+	for _, name := range st.snap.egressNodeNames() {
 		if st.snap.probe != nil {
 			r, _ := st.snap.probe(name)
-			metrics.CandidateReachable.WithLabelValues(name).Set(metrics.Bool(r.Reachable()))
+			metrics.EgressNodeReachable.WithLabelValues(name).Set(metrics.Bool(r.Reachable()))
 		}
-		metrics.CandidateAvailable.WithLabelValues(name).Set(metrics.Bool(st.snap.unavailable(name) == ""))
+		metrics.EgressNodeAvailable.WithLabelValues(name).Set(metrics.Bool(st.snap.unavailable(name) == ""))
 	}
 
 	metrics.ActiveNodeComponentReady.Reset()

@@ -23,7 +23,7 @@ type nodeInfo struct {
 	exists bool
 	// ip is the IPv4 InternalIP used for TCP probes.
 	ip          netip.Addr
-	candidate   bool
+	egressNode  bool
 	ready       bool
 	readyReason string
 	readyMsg    string
@@ -74,7 +74,7 @@ func newSnapshot(sel labels.Selector, active k8s.ActiveLabel, nodes []corev1.Nod
 		node := &nodes[i]
 		n := get(node.Name)
 		n.exists = true
-		n.candidate = sel.Matches(labels.Set(node.Labels))
+		n.egressNode = sel.Matches(labels.Set(node.Labels))
 		n.nodeLabel = s.active.Matches(node.Labels)
 		for _, a := range node.Status.Addresses {
 			if ip, err := netip.ParseAddr(a.Address); err == nil && a.Type == corev1.NodeInternalIP && ip.Is4() {
@@ -155,8 +155,8 @@ func (s *snapshot) failure(name string) (reason, msg string, failed bool) {
 	switch {
 	case !n.exists:
 		return v1alpha1.ReasonFailover, fmt.Sprintf("%s: node not found", name), true
-	case !n.candidate:
-		return v1alpha1.ReasonCandidateRemoved, fmt.Sprintf("%s no longer matches egressNodeSelector", name), true
+	case !n.egressNode:
+		return v1alpha1.ReasonEgressNodeRemoved, fmt.Sprintf("%s no longer matches egressNodeSelector", name), true
 	case !n.ready:
 		return v1alpha1.ReasonFailover, fmt.Sprintf("%s NotReady (%s)", name, n.readyReason), true
 	}
@@ -175,7 +175,7 @@ func (s *snapshot) unavailable(name string) string {
 	switch {
 	case !n.exists:
 		return "node not found"
-	case !n.candidate:
+	case !n.egressNode:
 		return "does not match egressNodeSelector"
 	}
 	if !n.ready {
@@ -203,22 +203,22 @@ func (s *snapshot) unavailable(name string) string {
 	return strings.Join(why, ", ")
 }
 
-// probeTargets returns the InternalIPs of the candidate nodes and of active.
+// probeTargets returns the InternalIPs of the egress nodes and of active.
 func (s *snapshot) probeTargets(active string) map[string]netip.Addr {
 	out := map[string]netip.Addr{}
 	for name, n := range s.nodes {
-		if n.exists && n.ip.IsValid() && (n.candidate || name == active) {
+		if n.exists && n.ip.IsValid() && (n.egressNode || name == active) {
 			out[name] = n.ip
 		}
 	}
 	return out
 }
 
-// candidateNames returns the sorted names of the candidate nodes.
-func (s *snapshot) candidateNames() []string {
+// egressNodeNames returns the sorted names of the egress nodes.
+func (s *snapshot) egressNodeNames() []string {
 	var out []string
 	for name, n := range s.nodes {
-		if n.exists && n.candidate {
+		if n.exists && n.egressNode {
 			out = append(out, name)
 		}
 	}
@@ -226,9 +226,9 @@ func (s *snapshot) candidateNames() []string {
 	return out
 }
 
-// otherReachable reports whether a candidate other than name passed its last TCP probe.
+// otherReachable reports whether an egress node other than name passed its last TCP probe.
 func (s *snapshot) otherReachable(name string) bool {
-	for _, c := range s.candidateNames() {
+	for _, c := range s.egressNodeNames() {
 		if r, ok := s.probe(c); c != name && ok && r.Reachable() {
 			return true
 		}

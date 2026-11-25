@@ -6,7 +6,7 @@ global:
   # Label the egress nodes with it, or select them with existing labels.
   egressNodeSelector:
     matchLabels:
-      egressgateway-ha.spidernet.io/candidate-node: "true"
+      egressgateway-ha.spidernet.io/egress-node: "true"
   # Put by the controller on the Node and CiliumNode of the active node only.
   # Managed CiliumEgressGatewayPolicies select it in their nodeSelector.
   # Install-time only: changing it later leaves existing policies and nodes

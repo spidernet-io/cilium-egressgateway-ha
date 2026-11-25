@@ -17,11 +17,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
-	"slices"
 	"time"
 
 	ciliumv2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -69,7 +69,7 @@ type Config struct {
 
 // StatusWriter applies the status fields owned by the controller.
 type StatusWriter interface {
-	Apply(ctx context.Context, conds []metav1.Condition, candidates []v1alpha1.CandidateStatus) error
+	Apply(ctx context.Context, conds []metav1.Condition, nodes []v1alpha1.EgressNodeStatus) error
 }
 
 // Prober probes nodes with TCP connections, see package probe.
@@ -88,7 +88,7 @@ type Reconciler struct {
 	Recorder events.EventRecorder
 	Config   Config
 	Now      func() time.Time
-	// Prober probes the candidate nodes; nil treats all nodes as reachable.
+	// Prober probes the egress nodes; nil treats all nodes as reachable.
 	Prober Prober
 
 	trigger chan event.GenericEvent
@@ -260,7 +260,7 @@ func (st *state) run(ctx context.Context) error {
 		}
 		to := st.snap.next("")
 		if to == "" {
-			st.noCandidate(fmt.Sprintf("no available candidate for the initial active node: %s", st.candidatesSummary()))
+			st.noEgressNode(fmt.Sprintf("no available egress node for the initial active node: %s", st.egressNodesSummary()))
 			return nil
 		}
 		return st.start(ctx, from, to, v1alpha1.ReasonInitial, fmt.Sprintf("%s selected as the initial active node", to))
@@ -360,8 +360,8 @@ func switchVerb(reason string) string {
 	switch reason {
 	case v1alpha1.ReasonManual:
 		return "manual switch"
-	case v1alpha1.ReasonCandidateRemoved:
-		return "candidate removed"
+	case v1alpha1.ReasonEgressNodeRemoved:
+		return "egress node removed"
 	default:
 		return "failover"
 	}
@@ -397,28 +397,28 @@ func (st *state) rejectTarget(ctx context.Context, from, target, why string) err
 	return nil
 }
 
-func (st *state) noCandidate(msg string) {
-	if c, ok := st.conds.get(v1alpha1.ConditionSwitching); !ok || c.Reason != v1alpha1.ReasonNoAvailableCandidate || c.Message != msg {
-		st.event(corev1.EventTypeWarning, v1alpha1.ReasonNoAvailableCandidate, msg)
+func (st *state) noEgressNode(msg string) {
+	if c, ok := st.conds.get(v1alpha1.ConditionSwitching); !ok || c.Reason != v1alpha1.ReasonNoAvailableEgressNode || c.Message != msg {
+		st.event(corev1.EventTypeWarning, v1alpha1.ReasonNoAvailableEgressNode, msg)
 	}
-	st.conds.set(v1alpha1.ConditionSwitching, metav1.ConditionTrue, v1alpha1.ReasonNoAvailableCandidate, msg)
+	st.conds.set(v1alpha1.ConditionSwitching, metav1.ConditionTrue, v1alpha1.ReasonNoAvailableEgressNode, msg)
 }
 
-// noFailoverTarget keeps the failed active node. When no other candidate is
+// noFailoverTarget keeps the failed active node. When no other egress node is
 // reachable either, the controller's own network is the likely cause.
 func (st *state) noFailoverTarget(active, msg string) {
 	if st.snap.probe != nil && !st.snap.otherReachable(active) {
-		st.noCandidate(msg + "; no other candidate is reachable from the controller either, " +
+		st.noEgressNode(msg + "; no other egress node is reachable from the controller either, " +
 			"not switching (check the network of the controller node)")
 		return
 	}
-	st.noCandidate(msg + ", and no other available candidate")
+	st.noEgressNode(msg + ", and no other available egress node")
 }
 
-func (st *state) candidatesSummary() string {
+func (st *state) egressNodesSummary() string {
 	var out []string
 	for name, n := range st.snap.nodes {
-		if n.candidate {
+		if n.egressNode {
 			out = append(out, fmt.Sprintf("%s: %s", name, st.snap.unavailable(name)))
 		}
 	}
@@ -587,23 +587,39 @@ func (st *state) setReachable() {
 	}
 }
 
-// candidates returns status.candidates: the TCP probe result of each candidate.
-func (st *state) candidates() []v1alpha1.CandidateStatus {
+// egressNodes returns status.egressNodes: the TCP probe result of each egress node.
+func (st *state) egressNodes() []v1alpha1.EgressNodeStatus {
 	if st.r.Prober == nil {
 		return nil
 	}
-	var out []v1alpha1.CandidateStatus
-	for _, name := range st.snap.candidateNames() {
+	prev := map[string]v1alpha1.EgressNodeStatus{}
+	for _, n := range st.egw.Status.EgressNodes {
+		prev[n.Name] = n
+	}
+	now := metav1.NewTime(st.r.now().UTC().Truncate(time.Second))
+	var out []v1alpha1.EgressNodeStatus
+	for _, name := range st.snap.egressNodeNames() {
 		res, _ := st.r.Prober.Get(name)
-		out = append(out, v1alpha1.CandidateStatus{Name: name, Reachable: res.Reachable()})
+		n := v1alpha1.EgressNodeStatus{Name: name, Reachable: res.Reachable(), LastTransitionTime: now}
+		switch {
+		case !res.Probed:
+			n.Message = "TCP probe not finished yet"
+		case !n.Reachable:
+			// Without the failure count, so the message does not change on every probe.
+			n.Message = fmt.Sprintf("probe to %s failed: %s", res.Addr, res.LastError)
+		}
+		if p, ok := prev[name]; ok && p.Reachable == n.Reachable {
+			n.LastTransitionTime = p.LastTransitionTime
+		}
+		out = append(out, n)
 	}
 	return out
 }
 
 func (st *state) applyStatus(ctx context.Context) error {
 	conds, changed := st.conds.result(st.egw.Generation)
-	cands := st.candidates()
-	if !changed && slices.Equal(cands, st.egw.Status.Candidates) {
+	cands := st.egressNodes()
+	if !changed && equality.Semantic.DeepEqual(cands, st.egw.Status.EgressNodes) {
 		return nil
 	}
 	return st.r.Status.Apply(ctx, conds, cands)

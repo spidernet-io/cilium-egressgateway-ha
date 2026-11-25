@@ -402,7 +402,7 @@ func (r *Reconciler) patchCiliumNode(ctx context.Context, now time.Time) error {
 }
 
 // CleanupOnExit removes the egress IPs on shutdown only when the node is no
-// longer a candidate, which is when the DaemonSet removes the agent. This also
+// longer an egress node, which is when the DaemonSet removes the agent. This also
 // applies to the active node: the controller switches away from it anyway, and
 // no agent would be left to remove the IP, which would block the new active
 // node with a DAD conflict. Otherwise, and on any read error, the egress IPs

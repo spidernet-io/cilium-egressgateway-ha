@@ -132,7 +132,7 @@ func egwha(active string) *v1alpha1.EgressGatewayHA {
 	return &v1alpha1.EgressGatewayHA{
 		ObjectMeta: metav1.ObjectMeta{Name: v1alpha1.SingletonName, Generation: 1},
 		Spec: v1alpha1.EgressGatewayHASpec{
-			EgressNodeSelector: metav1.LabelSelector{MatchLabels: map[string]string{"candidate": "true"}},
+			EgressNodeSelector: metav1.LabelSelector{MatchLabels: map[string]string{"egress": "true"}},
 			Interface:          "eth0",
 			EgressIPs:          []string{"172.18.0.200-172.18.0.210"},
 			ActiveNode:         active,
@@ -166,7 +166,7 @@ func newEnv(t *testing.T, funcs *interceptor.Funcs, objs ...client.Object) *env 
 	t.Helper()
 	objs = append(objs,
 		&ciliumv2.CiliumNode{ObjectMeta: metav1.ObjectMeta{Name: node}},
-		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: node, Labels: map[string]string{"candidate": "true"}}},
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: node, Labels: map[string]string{"egress": "true"}}},
 	)
 	b := fake.NewClientBuilder().WithScheme(k8s.NewScheme()).WithObjects(objs...).
 		WithStatusSubresource(&v1alpha1.EgressGatewayHA{})
@@ -439,20 +439,20 @@ func TestPeriodicGARP(t *testing.T) {
 }
 
 func TestCleanupOnExit(t *testing.T) {
-	notCandidate := egwha("node2")
-	notCandidate.Spec.EgressNodeSelector.MatchLabels = map[string]string{"candidate": "no"}
-	activeNotCandidate := egwha(node)
-	activeNotCandidate.Spec.EgressNodeSelector.MatchLabels = map[string]string{"candidate": "no"}
+	notEgressNode := egwha("node2")
+	notEgressNode.Spec.EgressNodeSelector.MatchLabels = map[string]string{"egress": "no"}
+	activeNotEgressNode := egwha(node)
+	activeNotEgressNode.Spec.EgressNodeSelector.MatchLabels = map[string]string{"egress": "no"}
 	for name, tc := range map[string]struct {
 		egw     *v1alpha1.EgressGatewayHA
 		funcs   *interceptor.Funcs
 		release bool
 	}{
-		"active node keeps":             {egw: egwha(node)},
-		"standby candidate keeps":       {egw: egwha("node2")},
-		"no longer candidate releases":  {egw: notCandidate, release: true},
-		"missing EgressGatewayHA keeps": {},
-		"API error keeps": {egw: notCandidate, funcs: &interceptor.Funcs{
+		"active node keeps":              {egw: egwha(node)},
+		"standby egress node keeps":      {egw: egwha("node2")},
+		"no longer egress node releases": {egw: notEgressNode, release: true},
+		"missing EgressGatewayHA keeps":  {},
+		"API error keeps": {egw: notEgressNode, funcs: &interceptor.Funcs{
 			Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
 				return errors.New("connection refused")
 			}}},

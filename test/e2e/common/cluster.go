@@ -20,9 +20,9 @@ import (
 )
 
 const (
-	// CandidateLabel marks the egress nodes; it is the default egressNodeSelector of the chart.
-	CandidateLabel = v1alpha1.DefaultCandidateLabelKey
-	SteadyTimeout  = 2 * time.Minute
+	// EgressNodeLabel marks the egress nodes; it is the default egressNodeSelector of the chart.
+	EgressNodeLabel = v1alpha1.DefaultEgressNodeLabelKey
+	SteadyTimeout   = 2 * time.Minute
 )
 
 // NewClient returns a client for the cluster in KUBECONFIG.

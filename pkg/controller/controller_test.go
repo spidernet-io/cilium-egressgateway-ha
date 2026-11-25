@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -42,7 +41,7 @@ type fakeStatus struct {
 	applies int
 }
 
-func (s *fakeStatus) Apply(ctx context.Context, conds []metav1.Condition, candidates []v1alpha1.CandidateStatus) error {
+func (s *fakeStatus) Apply(ctx context.Context, conds []metav1.Condition, nodes []v1alpha1.EgressNodeStatus) error {
 	s.applies++
 	egw := &v1alpha1.EgressGatewayHA{}
 	if err := s.c.Get(ctx, client.ObjectKey{Name: v1alpha1.SingletonName}, egw); err != nil {
@@ -52,13 +51,13 @@ func (s *fakeStatus) Apply(ctx context.Context, conds []metav1.Condition, candid
 		meta.RemoveStatusCondition(&egw.Status.Conditions, t)
 	}
 	egw.Status.Conditions = append(egw.Status.Conditions, conds...)
-	egw.Status.Candidates = candidates
+	egw.Status.EgressNodes = nodes
 	return s.c.Status().Update(ctx, egw)
 }
 
 type testNode struct {
 	name        string
-	candidate   bool
+	egressNode  bool
 	ready       bool
 	ciliumReady bool
 	agentReady  bool
@@ -76,8 +75,8 @@ func objects(nodes ...testNode) []client.Object {
 	}
 	for i, n := range nodes {
 		l := map[string]string{}
-		if n.candidate {
-			l["candidate"] = "true"
+		if n.egressNode {
+			l["egress"] = "true"
 		}
 		reason := "KubeletReady"
 		if !n.ready {
@@ -103,7 +102,7 @@ func newEGWHA(active string) *v1alpha1.EgressGatewayHA {
 	return &v1alpha1.EgressGatewayHA{
 		ObjectMeta: metav1.ObjectMeta{Name: v1alpha1.SingletonName, Generation: 1},
 		Spec: v1alpha1.EgressGatewayHASpec{
-			EgressNodeSelector: metav1.LabelSelector{MatchLabels: map[string]string{"candidate": "true"}},
+			EgressNodeSelector: metav1.LabelSelector{MatchLabels: map[string]string{"egress": "true"}},
 			Interface:          "eth0",
 			EgressIPs:          []string{"10.0.0.100"},
 			ActiveNode:         active,
@@ -323,7 +322,7 @@ func TestReadyWithoutManagedPolicy(t *testing.T) {
 func TestNext(t *testing.T) {
 	s := newSnapshot(labels.Everything(), activeLabel, nil, nil, nil, nil)
 	for _, n := range []string{"n1", "n2", "n3", "n4"} {
-		s.nodes[n] = &nodeInfo{name: n, exists: true, candidate: true, ready: true, hasCiliumNode: true, ciliumReady: true, agentReady: true}
+		s.nodes[n] = &nodeInfo{name: n, exists: true, egressNode: true, ready: true, hasCiliumNode: true, ciliumReady: true, agentReady: true}
 	}
 	s.nodes["n4"].agentReady = false
 	for cur, want := range map[string]string{"": "n1", "n1": "n2", "n2": "n3", "n3": "n1", "n4": "n1", "n0": "n1", "n9": "n1"} {
@@ -338,7 +337,7 @@ func TestNext(t *testing.T) {
 }
 
 func TestInitialElection(t *testing.T) {
-	// n1 sorts first but its agent is not ready, n4 is not a candidate.
+	// n1 sorts first but its agent is not ready, n4 is not an egress node.
 	e := newEnv(t, newEGWHA(""), testNode{"n1", true, true, true, false}, healthy("n3"), healthy("n2"),
 		testNode{"n4", false, true, true, true})
 
@@ -382,11 +381,11 @@ func TestInitialElection(t *testing.T) {
 	}
 }
 
-func TestNoCandidateAtStart(t *testing.T) {
+func TestNoEgressNodeAtStart(t *testing.T) {
 	e := newEnv(t, newEGWHA(""), testNode{"n1", true, true, false, true})
 	e.reconcile()
 	e.expect("", "")
-	e.expectCond(v1alpha1.ConditionSwitching, metav1.ConditionTrue, v1alpha1.ReasonNoAvailableCandidate, "n1: cilium-agent not ready")
+	e.expectCond(v1alpha1.ConditionSwitching, metav1.ConditionTrue, v1alpha1.ReasonNoAvailableEgressNode, "n1: cilium-agent not ready")
 	e.expectCond(v1alpha1.ConditionActiveNodeReady, metav1.ConditionUnknown, "NoActiveNode", "")
 }
 
@@ -428,19 +427,19 @@ func TestFailover(t *testing.T) {
 	e.expect("n1", "n3")
 }
 
-func TestCandidateRemoved(t *testing.T) {
+func TestEgressNodeRemoved(t *testing.T) {
 	e := steadyEnv(t, "n1", healthy("n1"), healthy("n2"))
 	n := &corev1.Node{}
 	if err := e.c.Get(context.Background(), client.ObjectKey{Name: "n1"}, n); err != nil {
 		t.Fatal(err)
 	}
-	delete(n.Labels, "candidate")
+	delete(n.Labels, "egress")
 	if err := e.c.Update(context.Background(), n); err != nil {
 		t.Fatal(err)
 	}
 	e.reconcile()
 	e.expect("n2", "n1")
-	if sw := e.switchRecord(); sw.Reason != v1alpha1.ReasonCandidateRemoved {
+	if sw := e.switchRecord(); sw.Reason != v1alpha1.ReasonEgressNodeRemoved {
 		t.Fatalf("switch record = %+v", sw)
 	}
 }
@@ -454,15 +453,15 @@ func TestComponentsNotReadyDoNotSwitch(t *testing.T) {
 	e.expectCond(v1alpha1.ConditionSwitching, metav1.ConditionFalse, v1alpha1.ReasonCompleted, "")
 }
 
-func TestNoAvailableCandidateKeepsActive(t *testing.T) {
+func TestNoAvailableEgressNodeKeepsActive(t *testing.T) {
 	e := steadyEnv(t, "n1", healthy("n1"), testNode{"n2", true, true, true, false})
 	e.setNodeReady("n1", false)
 	e.reconcile()
 	e.expect("n1", "n1")
-	e.expectCond(v1alpha1.ConditionSwitching, metav1.ConditionTrue, v1alpha1.ReasonNoAvailableCandidate,
-		"n1 NotReady (NodeStatusUnknown), and no other available candidate")
+	e.expectCond(v1alpha1.ConditionSwitching, metav1.ConditionTrue, v1alpha1.ReasonNoAvailableEgressNode,
+		"n1 NotReady (NodeStatusUnknown), and no other available egress node")
 	e.expectCond(v1alpha1.ConditionActiveNodeReady, metav1.ConditionFalse, "NodeStatusUnknown", "Kubelet stopped posting node status.")
-	if ev := e.events(); strings.Count(ev, v1alpha1.ReasonNoAvailableCandidate) != 1 {
+	if ev := e.events(); strings.Count(ev, v1alpha1.ReasonNoAvailableEgressNode) != 1 {
 		t.Errorf("events = %q", ev)
 	}
 	e.reconcile()
@@ -654,19 +653,48 @@ func probeEnv(t *testing.T, active string, nodes ...testNode) (*env, *fakeProber
 	return e, p
 }
 
-func TestProbeTargetsAndCandidatesStatus(t *testing.T) {
+func TestProbeTargetsAndEgressNodesStatus(t *testing.T) {
 	e, p := probeEnv(t, "n1", healthy("n1"), healthy("n2"), testNode{"n3", false, true, true, true})
 	if len(p.targets) != 2 || p.targets["n1"].String() != "10.0.0.1" || p.targets["n2"].String() != "10.0.0.2" {
-		t.Fatalf("targets = %v, want the candidates n1 and n2", p.targets)
+		t.Fatalf("targets = %v, want the egress nodes n1 and n2", p.targets)
 	}
 	e.expectCond(v1alpha1.ConditionActiveNodeReachable, metav1.ConditionTrue, v1alpha1.ReasonProbeSucceeded, "probe to 10.0.0.1:10250 succeeded")
 
+	t0 := e.r.now().UTC()
+	at := func(d time.Duration) metav1.Time { return metav1.NewTime(t0.Add(d)) }
+	expectNodes := func(want ...v1alpha1.EgressNodeStatus) {
+		t.Helper()
+		got := e.egw().Status.EgressNodes
+		if len(got) != len(want) {
+			t.Fatalf("status.egressNodes = %+v, want %+v", got, want)
+		}
+		for i := range want {
+			if got[i].Name != want[i].Name || got[i].Reachable != want[i].Reachable ||
+				!got[i].LastTransitionTime.Equal(&want[i].LastTransitionTime) || got[i].Message != want[i].Message {
+				t.Fatalf("status.egressNodes = %+v, want %+v", got, want)
+			}
+		}
+	}
+	expectNodes(v1alpha1.EgressNodeStatus{Name: "n1", Reachable: true, LastTransitionTime: at(0)},
+		v1alpha1.EgressNodeStatus{Name: "n2", Reachable: true, LastTransitionTime: at(0)})
+
+	// n2 becomes unreachable: only its transition time changes.
+	e.r.Now = func() time.Time { return t0.Add(time.Minute) }
 	p.fail("n2", 1)
 	e.reconcile()
-	want := []v1alpha1.CandidateStatus{{Name: "n1", Reachable: true}, {Name: "n2", Reachable: false}}
-	if got := e.egw().Status.Candidates; !slices.Equal(got, want) {
-		t.Fatalf("status.candidates = %v, want %v", got, want)
+	failed := v1alpha1.EgressNodeStatus{Name: "n2", Reachable: false, LastTransitionTime: at(time.Minute),
+		Message: "probe to 10.0.0.2:10250 failed: i/o timeout"}
+	expectNodes(v1alpha1.EgressNodeStatus{Name: "n1", Reachable: true, LastTransitionTime: at(0)}, failed)
+
+	// More failures change neither the transition time nor the message, so status is not written.
+	e.r.Now = func() time.Time { return t0.Add(2 * time.Minute) }
+	p.fail("n2", 5)
+	applies := e.status.applies
+	e.reconcile()
+	if e.status.applies != applies {
+		t.Error("status written although no egress node changed")
 	}
+	expectNodes(v1alpha1.EgressNodeStatus{Name: "n1", Reachable: true, LastTransitionTime: at(0)}, failed)
 }
 
 func TestProbeFailover(t *testing.T) {
@@ -696,26 +724,26 @@ func TestProbeFailover(t *testing.T) {
 	e.expectCond(v1alpha1.ConditionActiveNodeReachable, metav1.ConditionTrue, v1alpha1.ReasonProbeSucceeded, "10.0.0.3:10250")
 }
 
-func TestAllCandidatesUnreachableDoesNotSwitch(t *testing.T) {
+func TestAllEgressNodesUnreachableDoesNotSwitch(t *testing.T) {
 	e, p := probeEnv(t, "n1", healthy("n1"), healthy("n2"))
 	p.fail("n1", 3)
 	p.fail("n2", 3)
 	e.reconcile()
 	e.expect("n1", "n1")
 	e.expectCond(v1alpha1.ConditionActiveNodeReachable, metav1.ConditionFalse, v1alpha1.ReasonProbeFailed, "3/3 probes to 10.0.0.1:10250 failed")
-	e.expectCond(v1alpha1.ConditionSwitching, metav1.ConditionTrue, v1alpha1.ReasonNoAvailableCandidate,
-		"no other candidate is reachable from the controller either")
+	e.expectCond(v1alpha1.ConditionSwitching, metav1.ConditionTrue, v1alpha1.ReasonNoAvailableEgressNode,
+		"no other egress node is reachable from the controller either")
 	e.expectCond(v1alpha1.ConditionReady, metav1.ConditionFalse, v1alpha1.ConditionSwitching, "")
-	if ev := e.events(); !strings.Contains(ev, "Warning NoAvailableCandidate") {
+	if ev := e.events(); !strings.Contains(ev, "Warning NoAvailableEgressNode") {
 		t.Errorf("events = %q", ev)
 	}
 
-	// Another candidate reachable but not usable: a plain NoAvailableCandidate.
+	// Another egress node reachable but not usable: a plain NoAvailableEgressNode.
 	p.fail("n2", 0)
 	e.setPodReady(agentNS, "agent-n2", false)
 	e.reconcile()
-	e.expectCond(v1alpha1.ConditionSwitching, metav1.ConditionTrue, v1alpha1.ReasonNoAvailableCandidate,
-		"and no other available candidate")
+	e.expectCond(v1alpha1.ConditionSwitching, metav1.ConditionTrue, v1alpha1.ReasonNoAvailableEgressNode,
+		"and no other available egress node")
 }
 
 func TestUnprobedActiveKeepsReachableCondition(t *testing.T) {
@@ -730,7 +758,7 @@ func TestUnprobedActiveKeepsReachableCondition(t *testing.T) {
 	}
 	e.expect("n1", "n1")
 	if e.status.applies != applies+1 {
-		// Only status.candidates changes (both unprobed, so unreachable).
+		// Only status.egressNodes changes (both unprobed, so unreachable).
 		t.Fatalf("applies = %d, want %d", e.status.applies, applies+1)
 	}
 }
@@ -793,7 +821,7 @@ func TestEgressNodeProbeDisabled(t *testing.T) {
 	e, p := probeEnv(t, "n1", healthy("n1"), healthy("n2"))
 	e.expectCond(v1alpha1.ConditionActiveNodeReachable, metav1.ConditionTrue, v1alpha1.ReasonProbeSucceeded, "")
 	p.fail("n1", 3)
-	// Disabling the probe drops its condition and status.candidates, and a
+	// Disabling the probe drops its condition and status.egressNodes, and a
 	// failing probe no longer switches.
 	e.r.Prober = nil
 	e.reconcile()
@@ -801,8 +829,8 @@ func TestEgressNodeProbeDisabled(t *testing.T) {
 	if c := meta.FindStatusCondition(e.egw().Status.Conditions, v1alpha1.ConditionActiveNodeReachable); c != nil {
 		t.Errorf("ActiveNodeReachable = %+v, want removed", c)
 	}
-	if got := e.egw().Status.Candidates; len(got) != 0 {
-		t.Errorf("status.candidates = %v, want empty", got)
+	if got := e.egw().Status.EgressNodes; len(got) != 0 {
+		t.Errorf("status.egressNodes = %v, want empty", got)
 	}
 	e.expectCond(v1alpha1.ConditionReady, metav1.ConditionTrue, v1alpha1.ReasonAsExpected, "")
 }

@@ -77,7 +77,7 @@ func (e Env) EgressIPRange() string { return e.EgressIPStart.String() + "-" + e.
 // TargetIP is the IP of the external target.
 func (e Env) TargetIP() string { return strings.Split(e.TargetAddr, ":")[0] }
 
-// EgressNodes are the candidate nodes, sorted by name.
+// EgressNodes are the egress nodes, sorted by name.
 func (e Env) EgressNodes() []string { return []string{e.ControlPlane, e.Worker1, e.Worker2} }
 
 // AllNodes are all kind nodes.

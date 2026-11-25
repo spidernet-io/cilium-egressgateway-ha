@@ -41,7 +41,7 @@ make e2e-cluster
 
 - 创建 kind 集群 `egw-e2e`：1 个 control-plane 和 3 个 worker，使用单独的 docker 网络 `egw-e2e`。
 - 安装最新版本的 Cilium chart，开启 egress gateway。需要指定版本时，设置 `CILIUM_VERSION`，例如 `make e2e-cluster CILIUM_VERSION=1.20.5`。
-- 给 control-plane、worker、worker2 打上 `egressgateway-ha.spidernet.io/candidate-node=true`（chart 中 `global.egressNodeSelector` 的默认值），作为出口节点。
+- 给 control-plane、worker、worker2 打上 `egressgateway-ha.spidernet.io/egress-node=true`（chart 中 `global.egressNodeSelector` 的默认值），作为出口节点。
 - 在 worker3 上运行 client Pod，作为出口流量的来源。
 - 在 kind 网络中启动外部目标容器 `egw-e2e-target`。
 - 从 kind 网络的网段中选出目标 IP 和出口 IP 段，连同节点名写入 `.e2e/env`。

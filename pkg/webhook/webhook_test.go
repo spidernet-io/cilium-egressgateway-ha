@@ -29,7 +29,7 @@ func egwha(mutate func(*v1alpha1.EgressGatewayHASpec)) *v1alpha1.EgressGatewayHA
 	obj := &v1alpha1.EgressGatewayHA{
 		ObjectMeta: metav1.ObjectMeta{Name: v1alpha1.SingletonName},
 		Spec: v1alpha1.EgressGatewayHASpec{
-			EgressNodeSelector: metav1.LabelSelector{MatchLabels: map[string]string{"candidate": "true"}},
+			EgressNodeSelector: metav1.LabelSelector{MatchLabels: map[string]string{"egress": "true"}},
 			Interface:          "eth0",
 			EgressIPs:          []string{"10.0.0.100-10.0.0.110", "10.0.0.5"},
 		},
@@ -40,11 +40,11 @@ func egwha(mutate func(*v1alpha1.EgressGatewayHASpec)) *v1alpha1.EgressGatewayHA
 	return obj
 }
 
-func node(name, ip string, candidate bool) *corev1.Node {
+func node(name, ip string, egress bool) *corev1.Node {
 	n := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: map[string]string{}},
 		Status: corev1.NodeStatus{Addresses: []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: ip}}}}
-	if candidate {
-		n.Labels["candidate"] = "true"
+	if egress {
+		n.Labels["egress"] = "true"
 	}
 	return n
 }
@@ -202,9 +202,9 @@ func TestValidateEGWHA(t *testing.T) {
 		"valid":              {obj: set(func(s *v1alpha1.EgressGatewayHASpec) { s.DefaultEgressIP = "10.0.0.5" })},
 		"invalid egressIPs":  {obj: set(func(s *v1alpha1.EgressGatewayHASpec) { s.EgressIPs = []string{"10.0.0.9-10.0.0.1"} }), denied: "spec.egressIPs"},
 		"default not in IPs": {obj: set(func(s *v1alpha1.EgressGatewayHASpec) { s.DefaultEgressIP = "10.0.0.99" }), denied: "spec.defaultEgressIP 10.0.0.99 is not in spec.egressIPs"},
-		"active candidate":   {obj: set(func(s *v1alpha1.EgressGatewayHASpec) { s.ActiveNode = "n1" })},
+		"active egress node": {obj: set(func(s *v1alpha1.EgressGatewayHASpec) { s.ActiveNode = "n1" })},
 		"active not found":   {obj: set(func(s *v1alpha1.EgressGatewayHASpec) { s.ActiveNode = "n9" }), denied: "node n9 not found"},
-		"active not candidate": {old: set(func(s *v1alpha1.EgressGatewayHASpec) { s.ActiveNode = "n1" }),
+		"active not egress node": {old: set(func(s *v1alpha1.EgressGatewayHASpec) { s.ActiveNode = "n1" }),
 			obj: set(func(s *v1alpha1.EgressGatewayHASpec) { s.ActiveNode = "n2" }), denied: "node n2 does not match spec.egressNodeSelector"},
 		"unchanged deleted active node": {old: set(func(s *v1alpha1.EgressGatewayHASpec) { s.ActiveNode = "n9" }),
 			obj: set(func(s *v1alpha1.EgressGatewayHASpec) { s.ActiveNode = "n9"; s.Interface = "eth1" })},

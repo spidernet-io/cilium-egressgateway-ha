@@ -51,13 +51,13 @@
 给可以持有出口 IP 的节点打上 label：
 
 ```console
-$ kubectl label node egw-e2e-control-plane egw-e2e-worker egw-e2e-worker2 egressgateway-ha.spidernet.io/candidate-node=true
+$ kubectl label node egw-e2e-control-plane egw-e2e-worker egw-e2e-worker2 egressgateway-ha.spidernet.io/egress-node=true
 node/egw-e2e-control-plane labeled
 node/egw-e2e-worker labeled
 node/egw-e2e-worker2 labeled
 ```
 
-这些节点就是出口节点。主网关会从中选出，agent 也只会运行在这些节点上。`egressgateway-ha.spidernet.io/candidate-node=true` 是 `global.egressNodeSelector` 的默认值；如果想用节点上已有的 label，可以在安装时修改 `global.egressNodeSelector`。
+这些节点就是出口节点。主网关会从中选出，agent 也只会运行在这些节点上。`egressgateway-ha.spidernet.io/egress-node=true` 是 `global.egressNodeSelector` 的默认值；如果想用节点上已有的 label，可以在安装时修改 `global.egressNodeSelector`。
 
 ## 3. 安装
 
@@ -99,7 +99,7 @@ cilium-egressgateway-ha is installed in kube-system.
 | `controller.egressNodeProbe.enabled` | `true` | 对出口节点做 TCP 探测。关闭后，节点网络故障不会触发切换 |
 | `controller.ciliumAgentCheck.enabled` | `true` | 选择新主网关时，要求节点上的 cilium-agent Ready |
 | `ciliumEgressPolicyWebhook.enabled` | `true` | 补全和校验 policy。关闭后，未填写 egressIP 的 policy 不会被补全 |
-| `global.egressNodeSelector` | `egressgateway-ha.spidernet.io/candidate-node: "true"` | 选择出口节点。可以改用节点上已有的 label |
+| `global.egressNodeSelector` | `egressgateway-ha.spidernet.io/egress-node: "true"` | 选择出口节点。可以改用节点上已有的 label |
 | `global.activeNodeLabel.key`、`.value` | `egressgateway-ha.spidernet.io/active-node`、`"true"` | 主网关 label，只能在安装时设置 |
 | `egressGatewayHA.interface` | `""` | 出口网卡。为空时，agent 选择子网包含出口 IP 的网卡，找不到时用默认路由的网卡 |
 | `global.imageRegistryOverride` | `""` | 统一替换所有镜像的 registry，适合离线环境 |
@@ -203,7 +203,7 @@ spec:
   - 172.21.255.195-172.21.255.205
   egressNodeSelector:
     matchLabels:
-      egressgateway-ha.spidernet.io/candidate-node: "true"
+      egressgateway-ha.spidernet.io/egress-node: "true"
 status:
   activeNode:
     egressIPs:
@@ -258,7 +258,7 @@ status:
 ```
 
 - `status.activeNode`：主网关上已经配置的出口 IP。
-- `status.candidates`：各出口节点的 TCP 探测结果。
+- `status.egressNodes`：各出口节点的 TCP 探测结果。
 - `status.conditions`：选主、探测、切换和出口 IP 的状态。出现问题时，先看 `Ready` 的 reason 和 message。
 
 ## 7. 主备切换
@@ -301,14 +301,14 @@ Error from server (Forbidden): admission webhook "validate-egressgatewayha.egres
 ```console
 $ kubectl get events --field-selector involvedObject.kind=EgressGatewayHA
 LAST SEEN   TYPE      REASON                          OBJECT                    MESSAGE
-71s         Warning   NoAvailableCandidate            egressgatewayha/default   no available candidate for the initial active node: [egw-e2e-control-plane: egressgateway-ha agent not ready, TCP probe not finished yet egw-e2e-worker: egressgateway-ha agent not ready, TCP probe not finished yet egw-e2e-worker2: TCP probe not finished yet]
+71s         Warning   NoAvailableEgressNode            egressgatewayha/default   no available candidate for the initial active node: [egw-e2e-control-plane: egressgateway-ha agent not ready, TCP probe not finished yet egw-e2e-worker: egressgateway-ha agent not ready, TCP probe not finished yet egw-e2e-worker2: TCP probe not finished yet]
 70s         Normal    SwitchStarted                   egressgatewayha/default   switching <none> -> egw-e2e-worker2 (Initial): egw-e2e-worker2 selected as the initial active node
 70s         Normal    SwitchCompleted                 egressgatewayha/default   egw-e2e-worker2 became active node: egw-e2e-worker2 selected as the initial active node
 9s          Normal    SwitchStarted                   egressgatewayha/default   switching egw-e2e-worker2 -> egw-e2e-worker (Manual)
 8s          Normal    SwitchCompleted                 egressgatewayha/default   egw-e2e-worker became active node, manual switch from egw-e2e-worker2
 ```
 
-刚安装时，agent 还没有就绪，可能会出现一条 `NoAvailableCandidate` 告警，agent 就绪后会自动选出主网关。
+刚安装时，agent 还没有就绪，可能会出现一条 `NoAvailableEgressNode` 告警，agent 就绪后会自动选出主网关。
 
 ## 8. 卸载
 

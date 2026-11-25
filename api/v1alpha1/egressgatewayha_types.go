@@ -13,8 +13,8 @@ const (
 	DefaultActiveLabelKey   = "egressgateway-ha.spidernet.io/active-node"
 	DefaultActiveLabelValue = "true"
 
-	// DefaultCandidateLabelKey="true" is the default egressNodeSelector of the Helm chart.
-	DefaultCandidateLabelKey = "egressgateway-ha.spidernet.io/candidate-node"
+	// DefaultEgressNodeLabelKey="true" is the default egressNodeSelector of the Helm chart.
+	DefaultEgressNodeLabelKey = "egressgateway-ha.spidernet.io/egress-node"
 )
 
 // Condition types.
@@ -29,19 +29,19 @@ const (
 
 // Condition reasons.
 const (
-	ReasonInitial          = "Initial"
-	ReasonFailover         = "Failover"
-	ReasonManual           = "Manual"
-	ReasonCandidateRemoved = "CandidateRemoved"
+	ReasonInitial           = "Initial"
+	ReasonFailover          = "Failover"
+	ReasonManual            = "Manual"
+	ReasonEgressNodeRemoved = "EgressNodeRemoved"
 
 	ReasonProbeSucceeded = "ProbeSucceeded"
 	ReasonProbeFailed    = "ProbeFailed"
 
-	ReasonWaitingForGateway    = "WaitingForGateway"
-	ReasonEgressIPConflict     = "EgressIPConflict"
-	ReasonNoAvailableCandidate = "NoAvailableCandidate"
-	ReasonTargetUnavailable    = "TargetUnavailable"
-	ReasonCompleted            = "Completed"
+	ReasonWaitingForGateway     = "WaitingForGateway"
+	ReasonEgressIPConflict      = "EgressIPConflict"
+	ReasonNoAvailableEgressNode = "NoAvailableEgressNode"
+	ReasonTargetUnavailable     = "TargetUnavailable"
+	ReasonCompleted             = "Completed"
 
 	ReasonEgressIPsConfigured = "EgressIPsConfigured"
 	ReasonInterfaceNotFound   = "InterfaceNotFound"
@@ -98,10 +98,15 @@ type ActiveNodeStatus struct {
 	Ready bool `json:"ready"`
 }
 
-// CandidateStatus is the TCP probe result of a candidate node.
-type CandidateStatus struct {
+// EgressNodeStatus is the TCP probe result of an egress node.
+type EgressNodeStatus struct {
 	Name      string `json:"name"`
 	Reachable bool   `json:"reachable"`
+	// LastTransitionTime is when Reachable last changed.
+	LastTransitionTime metav1.Time `json:"lastTransitionTime"`
+	// Message is the last probe error, empty when the node is reachable.
+	// +optional
+	Message string `json:"message,omitempty"`
 }
 
 // EgressGatewayHAStatus defines the observed state of EgressGatewayHA.
@@ -112,7 +117,7 @@ type EgressGatewayHAStatus struct {
 	// +optional
 	// +listType=map
 	// +listMapKey=name
-	Candidates []CandidateStatus `json:"candidates,omitempty"`
+	EgressNodes []EgressNodeStatus `json:"egressNodes,omitempty"`
 
 	// +optional
 	// +listType=map
