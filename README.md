@@ -2,6 +2,9 @@
 
 High availability for the Cilium community Egress Gateway. See the [design doc](docs/design.md).
 
+- [Get started](docs/get-started.md): install, create a managed policy and switch the active node.
+- [Run e2e tests locally](docs/e2e-test.md)
+
 ## Install
 
 ```bash

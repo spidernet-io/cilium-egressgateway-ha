@@ -15,7 +15,10 @@ kubectl get pods -A -o wide > pods.txt 2>&1
 kubectl get events.events.k8s.io -A --sort-by=.metadata.creationTimestamp > events.txt 2>&1
 for p in $(kubectl -n "${E2E_NAMESPACE}" get pods -l app.kubernetes.io/instance=egwha -o name 2>/dev/null); do
   kubectl -n "${E2E_NAMESPACE}" logs "$p" --all-containers > "logs-${p#pod/}.txt" 2>&1
-  kubectl -n "${E2E_NAMESPACE}" logs "$p" --all-containers --previous > "logs-${p#pod/}-previous.txt" 2>/dev/null || true
+  # Only exists after a container restart.
+  if prev="$(kubectl -n "${E2E_NAMESPACE}" logs "$p" --all-containers --previous 2>/dev/null)"; then
+    echo "$prev" > "logs-${p#pod/}-previous.txt"
+  fi
 done
 for p in $(kubectl -n kube-system get pods -l k8s-app=cilium -o name 2>/dev/null); do
   kubectl -n kube-system logs "$p" -c cilium-agent > "logs-${p#pod/}.txt" 2>&1

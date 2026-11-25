@@ -2,6 +2,8 @@
 
 参考文档：
 
+- [快速开始](get-started.md)：安装、创建 policy、主备切换。
+- [在本地运行 e2e 测试](e2e-test.md)。
 - [Cilium Egress Gateway 行为分析](reference/cilium-behavior.md)：本项目依赖的 Cilium 行为和 kind 实测结果。
 - [设计细节](reference/design-details.md)：CRD 字段和 conditions、探测、agent、webhook、部署、RBAC，以及方案选择的理由。
 
