@@ -8,9 +8,13 @@ const (
 	// SingletonName is the only allowed name of the EgressGatewayHA object.
 	SingletonName = "default"
 
-	// ActiveLabelKey is set to ActiveLabelValue on the Node and CiliumNode of the active gateway.
-	ActiveLabelKey   = "egress-gw-active"
-	ActiveLabelValue = "true"
+	// DefaultActiveLabelKey=DefaultActiveLabelValue is put on the Node and
+	// CiliumNode of the active node. Configurable at install time.
+	DefaultActiveLabelKey   = "egressgateway-ha.spidernet.io/active-node"
+	DefaultActiveLabelValue = "true"
+
+	// DefaultCandidateLabelKey="true" is the default egressNodeSelector of the Helm chart.
+	DefaultCandidateLabelKey = "egressgateway-ha.spidernet.io/candidate-node"
 )
 
 // Condition types.

@@ -29,6 +29,9 @@ import (
 	"github.com/spidernet-io/cilium-egressgateway-ha/pkg/probe"
 )
 
+// A non-default active label checks that the configured label is used everywhere.
+var activeLabel = k8s.ActiveLabel{Key: "example.com/active", Value: "yes"}
+
 const (
 	ciliumNS = "kube-system"
 	agentNS  = "egw"
@@ -127,6 +130,7 @@ func newEnv(t *testing.T, egw *v1alpha1.EgressGatewayHA, nodes ...testNode) *env
 	e := &env{t: t, c: c, status: &fakeStatus{c: c}, recorder: events.NewFakeRecorder(100)}
 	e.r = &Reconciler{Client: c, Status: e.status, Recorder: e.recorder, Now: func() time.Time { return time.Unix(1_700_000_000, 0) },
 		Config: Config{
+			ActiveLabel:      activeLabel,
 			CiliumAgentCheck: true, CiliumNamespace: ciliumNS, CiliumSelector: labels.SelectorFromSet(labels.Set{"k8s-app": "cilium"}),
 			AgentNamespace: agentNS, AgentSelector: labels.SelectorFromSet(labels.Set{"app": "agent"}),
 			ResyncInterval: 10 * time.Second,
@@ -196,11 +200,11 @@ func (e *env) labelled() string {
 	}
 	onCN := map[string]bool{}
 	for _, cn := range cns.Items {
-		onCN[cn.Name] = isActive(cn.Labels)
+		onCN[cn.Name] = activeLabel.Matches(cn.Labels)
 	}
 	var out []string
 	for _, n := range nodes.Items {
-		switch on := isActive(n.Labels); {
+		switch on := activeLabel.Matches(n.Labels); {
 		case on && onCN[n.Name]:
 			out = append(out, n.Name)
 		case on:
@@ -214,7 +218,7 @@ func (e *env) labelled() string {
 
 func (e *env) setLabel(obj client.Object, on bool) {
 	e.t.Helper()
-	if err := e.c.Patch(context.Background(), obj, labelPatch(on)); err != nil {
+	if err := e.c.Patch(context.Background(), obj, labelPatch(activeLabel, on)); err != nil {
 		e.t.Fatal(err)
 	}
 }
@@ -309,7 +313,7 @@ func steadyEnv(t *testing.T, active string, nodes ...testNode) *env {
 }
 
 func TestNext(t *testing.T) {
-	s := newSnapshot(labels.Everything(), nil, nil, nil, nil)
+	s := newSnapshot(labels.Everything(), activeLabel, nil, nil, nil, nil)
 	for _, n := range []string{"n1", "n2", "n3", "n4"} {
 		s.nodes[n] = &nodeInfo{name: n, exists: true, candidate: true, ready: true, hasCiliumNode: true, ciliumReady: true, agentReady: true}
 	}
@@ -750,7 +754,7 @@ func TestMetricsAndComponentEvents(t *testing.T) {
 	if err := e.c.Create(context.Background(), &ciliumv2.CiliumEgressGatewayPolicy{
 		ObjectMeta: metav1.ObjectMeta{Name: "p"},
 		Spec: ciliumv2.CiliumEgressGatewayPolicySpec{EgressGateway: &ciliumv2.EgressGateway{
-			NodeSelector: &slimv1.LabelSelector{MatchLabels: map[string]slimv1.MatchLabelsValue{v1alpha1.ActiveLabelKey: "true"}}}},
+			NodeSelector: &slimv1.LabelSelector{MatchLabels: map[string]slimv1.MatchLabelsValue{activeLabel.Key: slimv1.MatchLabelsValue(activeLabel.Value)}}}},
 	}); err != nil {
 		t.Fatal(err)
 	}

@@ -54,6 +54,7 @@ spec:
         command: ["/usr/local/bin/agent"]
         args:
         - --reconcile-interval={{ .Values.agent.reconcileInterval }}
+        {{- include "egwha.activeNodeLabelArgs" . | nindent 8 }}
         - --garp-interval={{ .Values.agent.garpInterval }}
         - --health-probe-bind-address=:{{ .Values.agent.healthPort }}
         - --metrics-bind-address=:{{ .Values.agent.metricsPort }}

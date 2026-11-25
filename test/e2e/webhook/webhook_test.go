@@ -19,7 +19,7 @@ import (
 // policy selects no pod, so it never affects egress traffic.
 func policy(name string, mutate func(*ciliumv2.EgressGateway)) *ciliumv2.CiliumEgressGatewayPolicy {
 	gw := &ciliumv2.EgressGateway{NodeSelector: &slimv1.LabelSelector{
-		MatchLabels: map[string]slimv1.MatchLabelsValue{v1alpha1.ActiveLabelKey: v1alpha1.ActiveLabelValue}}}
+		MatchLabels: map[string]slimv1.MatchLabelsValue{v1alpha1.DefaultActiveLabelKey: v1alpha1.DefaultActiveLabelValue}}}
 	if mutate != nil {
 		mutate(gw)
 	}
@@ -79,7 +79,7 @@ var _ = Describe("CiliumEgressGatewayPolicy webhook", func() {
 			"nodeSelector must only be matchLabels"),
 		Entry("matchExpressions", func(gw *ciliumv2.EgressGateway) {
 			gw.NodeSelector = &slimv1.LabelSelector{MatchExpressions: []slimv1.LabelSelectorRequirement{
-				{Key: v1alpha1.ActiveLabelKey, Operator: slimv1.LabelSelectorOpExists}}}
+				{Key: v1alpha1.DefaultActiveLabelKey, Operator: slimv1.LabelSelectorOpExists}}}
 		}, nil, "nodeSelector must only be matchLabels"),
 		Entry("interface", func(gw *ciliumv2.EgressGateway) { gw.Interface = "eth0" }, nil,
 			"egressGateway.interface must not be set"),

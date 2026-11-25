@@ -35,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/spidernet-io/cilium-egressgateway-ha/api/v1alpha1"
+	"github.com/spidernet-io/cilium-egressgateway-ha/pkg/k8s"
 	"github.com/spidernet-io/cilium-egressgateway-ha/pkg/metrics"
 	"github.com/spidernet-io/cilium-egressgateway-ha/pkg/probe"
 )
@@ -54,6 +55,7 @@ type switchRecord struct {
 }
 
 type Config struct {
+	ActiveLabel k8s.ActiveLabel
 	// CiliumAgentCheck requires a ready cilium-agent on a new active node.
 	CiliumAgentCheck bool
 	CiliumNamespace  string
@@ -187,7 +189,7 @@ func (r *Reconciler) snapshot(ctx context.Context, sel labels.Selector, active s
 	if err := r.Client.List(ctx, cns); err != nil {
 		return nil, err
 	}
-	activeSel := client.MatchingLabels{v1alpha1.ActiveLabelKey: v1alpha1.ActiveLabelValue}
+	activeSel := client.MatchingLabels{r.Config.ActiveLabel.Key: r.Config.ActiveLabel.Value}
 	labelledNodes := &corev1.NodeList{}
 	if err := r.reader().List(ctx, labelledNodes, activeSel); err != nil {
 		return nil, err
@@ -208,7 +210,7 @@ func (r *Reconciler) snapshot(ctx context.Context, sel labels.Selector, active s
 		client.MatchingLabelsSelector{Selector: r.Config.AgentSelector}); err != nil {
 		return nil, err
 	}
-	s := newSnapshot(sel, nodes.Items, cns.Items, ciliumPods.Items, agentPods.Items)
+	s := newSnapshot(sel, r.Config.ActiveLabel, nodes.Items, cns.Items, ciliumPods.Items, agentPods.Items)
 	s.ciliumAgentCheck = r.Config.CiliumAgentCheck
 	s.setLabels(labelledNodes.Items, labelledCNs.Items)
 	if r.Prober != nil {
@@ -461,12 +463,12 @@ func (st *state) setActive(ctx context.Context, node string, sw *switchRecord) e
 	return nil
 }
 
-func labelPatch(on bool) client.Patch {
+func labelPatch(l k8s.ActiveLabel, on bool) client.Patch {
 	v := "null"
 	if on {
-		v = fmt.Sprintf("%q", v1alpha1.ActiveLabelValue)
+		v = fmt.Sprintf("%q", l.Value)
 	}
-	return client.RawPatch(types.MergePatchType, fmt.Appendf(nil, `{"metadata":{"labels":{%q:%s}}}`, v1alpha1.ActiveLabelKey, v))
+	return client.RawPatch(types.MergePatchType, fmt.Appendf(nil, `{"metadata":{"labels":{%q:%s}}}`, l.Key, v))
 }
 
 // moveLabel puts the active label on the Node and CiliumNode of active first,
@@ -476,14 +478,14 @@ func (st *state) moveLabel(ctx context.Context, active string) error {
 	log := logf.FromContext(ctx)
 	apply := func(n *nodeInfo, on bool) error {
 		if n.exists && n.nodeLabel != on {
-			if err := st.r.Client.Patch(ctx, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: n.name}}, labelPatch(on)); err != nil {
+			if err := st.r.Client.Patch(ctx, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: n.name}}, labelPatch(st.r.Config.ActiveLabel, on)); err != nil {
 				return fmt.Errorf("label Node %s: %w", n.name, err)
 			}
 			n.nodeLabel = on
 			log.Info("updated active label", "node", n.name, "kind", "Node", "active", on)
 		}
 		if n.hasCiliumNode && n.ciliumNodeLabel != on {
-			if err := st.r.Client.Patch(ctx, &ciliumv2.CiliumNode{ObjectMeta: metav1.ObjectMeta{Name: n.name}}, labelPatch(on)); err != nil {
+			if err := st.r.Client.Patch(ctx, &ciliumv2.CiliumNode{ObjectMeta: metav1.ObjectMeta{Name: n.name}}, labelPatch(st.r.Config.ActiveLabel, on)); err != nil {
 				return fmt.Errorf("label CiliumNode %s: %w", n.name, err)
 			}
 			n.ciliumNodeLabel = on

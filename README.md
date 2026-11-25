@@ -8,16 +8,16 @@ High availability for the Cilium community Egress Gateway. See the [design doc](
 ## Install
 
 ```bash
-helm install egwha charts/cilium-egressgateway-ha -n kube-system \
-  --set global.egressNodeSelector.matchLabels.node-role\.example\.com/egress=true \
+kubectl label node <egress nodes> egressgateway-ha.spidernet.io/candidate-node=true
+helm repo add egressgateway-ha https://spidernet-io.github.io/cilium-egressgateway-ha
+helm install egwha egressgateway-ha/cilium-egressgateway-ha -n kube-system \
   --set egressGatewayHA.interface=eth0 \
   --set 'egressGatewayHA.egressIPs={192.168.10.100-192.168.10.110}'
 kubectl get egressgatewayha
 ```
 
 Then create `CiliumEgressGatewayPolicy` objects whose `egressGateway.nodeSelector` is
-`matchLabels: {egress-gw-active: "true"}`. See the [design doc](docs/design.md) for
-the full values and behavior.
+`matchLabels: {egressgateway-ha.spidernet.io/active-node: "true"}`. See [Get started](docs/get-started.md).
 
 ## Development
 

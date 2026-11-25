@@ -27,6 +27,9 @@ import (
 	"github.com/spidernet-io/cilium-egressgateway-ha/pkg/netops"
 )
 
+// A non-default active label checks that the configured label is used everywhere.
+var activeLabel = k8s.ActiveLabel{Key: "example.com/active", Value: "yes"}
+
 const node = "node1"
 
 var (
@@ -128,7 +131,7 @@ func egwha(active string) *v1alpha1.EgressGatewayHA {
 func policy(name, egressIP string, managed bool) *ciliumv2.CiliumEgressGatewayPolicy {
 	sel := map[string]slimv1.MatchLabelsValue{"other": "x"}
 	if managed {
-		sel = map[string]slimv1.MatchLabelsValue{v1alpha1.ActiveLabelKey: "true"}
+		sel = map[string]slimv1.MatchLabelsValue{activeLabel.Key: slimv1.MatchLabelsValue(activeLabel.Value)}
 	}
 	return &ciliumv2.CiliumEgressGatewayPolicy{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
@@ -161,7 +164,7 @@ func newEnv(t *testing.T, funcs *interceptor.Funcs, objs ...client.Object) *env 
 	c := b.Build()
 	e := &env{c: c, ops: newFakeOps(), status: &fakeStatus{c: c}, now: time.Unix(1_700_000_000, 0)}
 	e.r = &Reconciler{Client: c, Ops: e.ops, Status: e.status, Now: func() time.Time { return e.now },
-		Config: Config{NodeName: node, ReconcileInterval: 10 * time.Second}}
+		Config: Config{NodeName: node, ActiveLabel: activeLabel, ReconcileInterval: 10 * time.Second}}
 	return e
 }
 

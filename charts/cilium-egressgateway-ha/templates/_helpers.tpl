@@ -34,7 +34,13 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end }}
 {{- end -}}
 
-{{/* CEL: the policy references the active label in its nodeSelector. */}}
+{{/* CEL: the policy references the active label key in its nodeSelector. */}}
 {{- define "egwha.managedPolicyExpression" -}}
-has(object.spec.egressGateway) && has(object.spec.egressGateway.nodeSelector) && ((has(object.spec.egressGateway.nodeSelector.matchLabels) && 'egress-gw-active' in object.spec.egressGateway.nodeSelector.matchLabels) || (has(object.spec.egressGateway.nodeSelector.matchExpressions) && object.spec.egressGateway.nodeSelector.matchExpressions.exists(e, e.key == 'egress-gw-active')))
+{{- $key := .Values.global.activeNodeLabel.key -}}
+has(object.spec.egressGateway) && has(object.spec.egressGateway.nodeSelector) && ((has(object.spec.egressGateway.nodeSelector.matchLabels) && '{{ $key }}' in object.spec.egressGateway.nodeSelector.matchLabels) || (has(object.spec.egressGateway.nodeSelector.matchExpressions) && object.spec.egressGateway.nodeSelector.matchExpressions.exists(e, e.key == '{{ $key }}')))
+{{- end -}}
+
+{{- define "egwha.activeNodeLabelArgs" -}}
+- --active-node-label-key={{ required "global.activeNodeLabel.key is required" .Values.global.activeNodeLabel.key }}
+- --active-node-label-value={{ required "global.activeNodeLabel.value is required" .Values.global.activeNodeLabel.value }}
 {{- end -}}

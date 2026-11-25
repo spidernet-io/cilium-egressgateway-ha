@@ -16,7 +16,7 @@ metadata:
 spec:
   egressNodeSelector:               # 出口节点，即候选网关节点
     matchLabels:
-      node-role.example.com/egress: "true"
+      egressgateway-ha.spidernet.io/candidate-node: "true"
   interface: eth0                   # agent 把出口 IP 配到这块网卡上。不会写入 policy
   egressIPs:                        # 允许使用的出口 IP，支持单个 IP 和地址范围
   - 192.168.10.100-192.168.10.110
@@ -38,7 +38,7 @@ status:
 
 - CRD schema 中用 CEL 规则（`self.metadata.name == 'default'`）限制只能创建一个实例。
 - `kubectl get egressgatewayha` 通过 printer columns 显示 `ACTIVE`（`spec.activeNode`）、`REACHABLE`、`READY`、`AGE`。
-- status 中不单独记录"已经完成切换的节点"。切换是否完成，以 `egress-gw-active` label 实际所在的节点为准，避免维护一份需要和 label 保持一致的状态。
+- status 中不单独记录"已经完成切换的节点"。切换是否完成，以 `egressgateway-ha.spidernet.io/active-node` label 实际所在的节点为准，避免维护一份需要和 label 保持一致的状态。
 - 进行中的切换记录在 annotation `egressgateway-ha.spidernet.io/switch` 中（JSON：`from`、`to`、`reason`、`message`），和 `spec.activeNode` 在同一次 patch 中写入，切换完成后删除。controller 重启后据此继续切换，并在完成时写出 `ActiveNodeElected` 的 reason。`spec.activeNode` 变化了、但 annotation 中的 `to` 不等于它时，说明是运维修改的，按手动切换处理。
 
 ### 1.2 spec 的创建方式
@@ -57,7 +57,7 @@ status:
 | `ActiveNodeElected` | controller | 已经选出主网关，并且 label 已经在这个节点上 | `Initial`（初次部署）、`Failover`（故障切换）、`Manual`（运维修改）、`CandidateRemoved`（原主网关不再是候选节点） | `node2 became active node, failover from node1: probe failed` |
 | `ActiveNodeReachable` | controller | 主网关的 TCP 探测结果 | `ProbeSucceeded`、`ProbeFailed`；还没有探测结果时为 `Probing`，没有主网关时为 `NoActiveNode`（status 都为 Unknown） | `3/3 probes to 172.18.0.3:10250 failed: i/o timeout` |
 | `ActiveNodeReady` | controller | 主网关 Node 的 Ready 状态 | 沿用 Node Ready condition 的 reason，例如 `KubeletReady`、`NodeStatusUnknown`；Node 不存在时为 `NodeNotFound`；还没有主网关时为 `NoActiveNode`（status 为 Unknown） | `node1 NotReady since 08:00:01: Kubelet stopped posting node status` |
-| `Switching` | controller | `egress-gw-active` label 还没有打在 `spec.activeNode` 节点上，正在切换 | `WaitingForGateway`、`EgressIPConflict`、`NoAvailableCandidate`、`TargetUnavailable`、`Completed` | `switching node1 -> node2: waiting for egress IPs on node2` |
+| `Switching` | controller | `egressgateway-ha.spidernet.io/active-node` label 还没有打在 `spec.activeNode` 节点上，正在切换 | `WaitingForGateway`、`EgressIPConflict`、`NoAvailableCandidate`、`TargetUnavailable`、`Completed` | `switching node1 -> node2: waiting for egress IPs on node2` |
 | `GatewayReady` | 主网关的 agent | 所有出口 IP 都已经配置到主网关的网卡上 | `EgressIPsConfigured`、`EgressIPConflict`、`InterfaceNotFound`、`ConfigureFailed` | `192.168.10.100 is answered by aa:bb:cc:dd:ee:ff, not added` |
 | `Ready` | controller | 汇总状态，用于 `kubectl wait --for=condition=Ready` 和 ArgoCD 健康检查 | `AsExpected`，或者第一个异常 condition 的 type | `ActiveNodeReachable: 3/3 probes to 172.18.0.3:10250 failed` |
 
@@ -78,7 +78,7 @@ status:
 - 两方都用 Server-Side Apply 更新 status，使用不同的 field manager，各自只管理自己的字段。conditions 声明为 `listType=map`、`listMapKey=type`，所以按 condition 类型分属不同的 field manager，不会互相覆盖。切换主网关时，新主网关的 agent 用 force apply 接管 `status.activeNode` 和 `GatewayReady`。
 - 切换过程中，新节点的 agent 写入之前，`status.activeNode` 仍然是旧主网关留下的内容。所以 controller 只有在 `status.activeNode.name` 等于 `spec.activeNode` 时，才认为它有效。
 - `candidates` 只记录 TCP 探测结果。选择新主网关时用到的 Node Ready、cilium-agent 和 agent Pod 的就绪状态，controller 直接从 Node 和 Pod 对象读取，不写进 status。
-- controller 每次 reconcile 都直接从 API Server 读取 `EgressGatewayHA`，以及带 `egress-gw-active` label 的 Node 和 CiliumNode（按 label selector 过滤，对象很少），不使用 informer 缓存。刚写完 status 或 label 后，缓存可能还是旧的；用旧数据计算 conditions 并写回，会覆盖刚写入的结果，或者把 controller 自己移动的 label 误判为手动切换。其他信息（Node Ready、候选 label、Pod 就绪状态）仍然从缓存读取，短暂过期只会推迟判断。
+- controller 每次 reconcile 都直接从 API Server 读取 `EgressGatewayHA`，以及带 `egressgateway-ha.spidernet.io/active-node` label 的 Node 和 CiliumNode（按 label selector 过滤，对象很少），不使用 informer 缓存。刚写完 status 或 label 后，缓存可能还是旧的；用旧数据计算 conditions 并写回，会覆盖刚写入的结果，或者把 controller 自己移动的 label 误判为手动切换。其他信息（Node Ready、候选 label、Pod 就绪状态）仍然从缓存读取，短暂过期只会推迟判断。
 
 ## 2. 节点故障探测
 
@@ -199,21 +199,21 @@ controller 的两个副本都提供 webhook 服务，不依赖工作实例。
 
 ### 4.1 作用范围
 
-- 只处理 nodeSelector 中引用了 `egress-gw-active` 的 `CiliumEgressGatewayPolicy`。`objectSelector` 只能按 label 过滤，不能看 spec，所以改用 webhook 配置中的 `matchConditions`（Kubernetes 1.30 GA）。这条 CEL 表达式由 API Server 在调用 webhook 之前执行：
+- 只处理 nodeSelector 中引用了 `egressgateway-ha.spidernet.io/active-node` 的 `CiliumEgressGatewayPolicy`。`objectSelector` 只能按 label 过滤，不能看 spec，所以改用 webhook 配置中的 `matchConditions`（Kubernetes 1.30 GA）。这条 CEL 表达式由 API Server 在调用 webhook 之前执行：
 
   ```yaml
   matchConditions:
-  - name: managed-by-egress-gw-ha
+  - name: managed-by-egressgateway-ha
     expression: >
       has(object.spec.egressGateway) && has(object.spec.egressGateway.nodeSelector) &&
       ((has(object.spec.egressGateway.nodeSelector.matchLabels) &&
-        'egress-gw-active' in object.spec.egressGateway.nodeSelector.matchLabels) ||
+        'egressgateway-ha.spidernet.io/active-node' in object.spec.egressGateway.nodeSelector.matchLabels) ||
        (has(object.spec.egressGateway.nodeSelector.matchExpressions) &&
-        object.spec.egressGateway.nodeSelector.matchExpressions.exists(e, e.key == 'egress-gw-active')))
+        object.spec.egressGateway.nodeSelector.matchExpressions.exists(e, e.key == 'egressgateway-ha.spidernet.io/active-node')))
   ```
 
   同时匹配 `matchExpressions`，是为了让 validating webhook 拒绝这种写法（见 4.3）。
-- 处理 CREATE 和 UPDATE。UPDATE 时如果用户把 `egress-gw-active` 从 nodeSelector 中去掉，新对象不再匹配，policy 就不再由本项目管理。
+- 处理 CREATE 和 UPDATE。UPDATE 时如果用户把 `egressgateway-ha.spidernet.io/active-node` 从 nodeSelector 中去掉，新对象不再匹配，policy 就不再由本项目管理。
 - 不匹配的 policy 完全不受影响，不会被发送到 webhook，controller 故障也不会阻止它们的创建。
 - 另外校验 `EgressGatewayHA`（见 4.4）。
 
@@ -227,7 +227,7 @@ controller 的两个副本都提供 webhook 服务，不依赖工作实例。
 
 拒绝以下情况：
 
-- nodeSelector 不是只有 `matchLabels: {egress-gw-active: "true"}`，例如 value 不是 `"true"`、还有其他 label，或者使用了 `matchExpressions`。原因是：如果还有其他条件，Cilium 会要求节点同时满足，当前主网关一旦不满足，流量就会被丢弃。
+- nodeSelector 不是只有 `matchLabels: {egressgateway-ha.spidernet.io/active-node: "true"}`，例如 value 不是 `"true"`、还有其他 label，或者使用了 `matchExpressions`。原因是：如果还有其他条件，Cilium 会要求节点同时满足，当前主网关一旦不满足，流量就会被丢弃。
 - 填写了 `egressGateway.interface`（原因见 4.2）。
 - 使用了多网关字段 `egressGateways`。
 - egressIP 不是 IPv4。
@@ -321,9 +321,25 @@ Event：
 
 `helm uninstall` 只删除 controller、agent 和 webhook，不影响出口流量：
 
-- agent 退出时节点仍然是候选节点，所以保留出口 IP；`egress-gw-active` label 也留在主网关上。
+- agent 退出时节点仍然是候选节点，所以保留出口 IP；`egressgateway-ha.spidernet.io/active-node` label 也留在主网关上。
 - `EgressGatewayHA default`、证书 Secret、Lease 由 controller 创建，CRD 在 chart 的 `crds/` 目录中，都不会被删除。重新安装时沿用已有的 `EgressGatewayHA`。
 - 彻底清理时，先删除被管理的 policy 和 `EgressGatewayHA default`，再删除主网关上的 label 和地址 label 为 `<网卡>:egw` 的出口 IP。
+
+### 5.6 两个 label
+
+| label | 默认值 | 打在哪里 | 由谁维护 | 用途 |
+|---|---|---|---|---|
+| 出口节点 label | `egressgateway-ha.spidernet.io/candidate-node=true` | 所有出口节点 | 运维 | `global.egressNodeSelector` 的默认值：agent DaemonSet 的调度范围，以及 CR 的 `spec.egressNodeSelector` |
+| 主网关 label | `egressgateway-ha.spidernet.io/active-node=true` | Node 和 CiliumNode，同一时刻只有主网关 | controller | 被管理的 policy 用它作为 nodeSelector，Cilium 据此选择网关；本项目据此识别被管理的 policy |
+
+出口节点 label 只是 selector 的默认值，可以改用节点上已有的 label，例如机房或角色。
+
+主网关 label 通过 Helm value `global.activeNodeLabel.key` 和 `.value` 配置，以启动参数 `--active-node-label-key`、`--active-node-label-value` 传给 controller 和 agent，并用来渲染 webhook 的 `matchConditions`。约束：
+
+- **只在安装时设置。** 安装后修改，已有 policy 的 nodeSelector 仍然引用旧 label，主网关上的旧 label 也不会被删除。需要修改时，先删除被管理的 policy、卸载，并删除节点上的旧 label，再重新安装。
+- key 和 value 必须是合法的 Kubernetes label；不要使用 `kubernetes.io`、`k8s.io` 前缀，这些前缀受 kubelet 和 NodeRestriction 的限制。
+- 不能被 Cilium 的 `exclude-node-label-patterns` 排除，否则 cilium-agent 不会把 Node 上的 label 同步到 CiliumNode。
+- 不放进 CR 的 spec，避免运行期间被修改；controller、agent 和 webhook 配置都来自同一个 Helm value。
 
 ## 6. 方案选择
 

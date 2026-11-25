@@ -32,8 +32,9 @@ const (
 )
 
 type Handlers struct {
-	Client  client.Reader
-	Decoder admission.Decoder
+	ActiveLabel k8s.ActiveLabel
+	Client      client.Reader
+	Decoder     admission.Decoder
 }
 
 func (h *Handlers) getEGWHA(ctx context.Context) (*v1alpha1.EgressGatewayHA, error) {
@@ -73,7 +74,7 @@ func (h *Handlers) MutatePolicy(ctx context.Context, req admission.Request) admi
 	if err := h.Decoder.Decode(req, p); err != nil {
 		return admission.Errored(http.StatusBadRequest, err)
 	}
-	if !k8s.IsManagedPolicy(p) || p.Spec.EgressGateway.EgressIP != "" {
+	if !h.ActiveLabel.IsManaged(p) || p.Spec.EgressGateway.EgressIP != "" {
 		return admission.Allowed("")
 	}
 	egw, err := h.getEGWHA(ctx)
@@ -94,7 +95,7 @@ func (h *Handlers) ValidatePolicy(ctx context.Context, req admission.Request) ad
 	if err := h.Decoder.Decode(req, p); err != nil {
 		return admission.Errored(http.StatusBadRequest, err)
 	}
-	if !k8s.IsManagedPolicy(p) {
+	if !h.ActiveLabel.IsManaged(p) {
 		return admission.Allowed("")
 	}
 	gw := p.Spec.EgressGateway
@@ -102,9 +103,9 @@ func (h *Handlers) ValidatePolicy(ctx context.Context, req admission.Request) ad
 
 	sel := gw.NodeSelector
 	if len(sel.MatchExpressions) > 0 || len(sel.MatchLabels) != 1 ||
-		string(sel.MatchLabels[v1alpha1.ActiveLabelKey]) != v1alpha1.ActiveLabelValue {
+		string(sel.MatchLabels[h.ActiveLabel.Key]) != h.ActiveLabel.Value {
 		errs = append(errs, fmt.Sprintf("egressGateway.nodeSelector must only be matchLabels {%s: %q}",
-			v1alpha1.ActiveLabelKey, v1alpha1.ActiveLabelValue))
+			h.ActiveLabel.Key, h.ActiveLabel.Value))
 	}
 	if gw.Interface != "" {
 		errs = append(errs, "egressGateway.interface must not be set: Cilium ignores policies with both interface and egressIP; "+
@@ -125,7 +126,7 @@ func (h *Handlers) ValidatePolicy(ctx context.Context, req admission.Request) ad
 	resp := admission.Allowed("")
 	if req.Operation == admissionv1.Update {
 		old := &ciliumv2.CiliumEgressGatewayPolicy{}
-		if err := h.Decoder.DecodeRaw(req.OldObject, old); err == nil && k8s.IsManagedPolicy(old) &&
+		if err := h.Decoder.DecodeRaw(req.OldObject, old); err == nil && h.ActiveLabel.IsManaged(old) &&
 			old.Spec.EgressGateway.EgressIP != "" && old.Spec.EgressGateway.EgressIP != gw.EgressIP {
 			resp = resp.WithWarnings(fmt.Sprintf("egressIP changed from %s to %s: existing connections will be broken",
 				old.Spec.EgressGateway.EgressIP, gw.EgressIP))
@@ -227,7 +228,7 @@ func (h *Handlers) ValidateEGWHA(ctx context.Context, req admission.Request) adm
 		var inUse []string
 		for i := range policies.Items {
 			p := &policies.Items[i]
-			if !k8s.IsManagedPolicy(p) || p.Spec.EgressGateway.EgressIP == "" {
+			if !h.ActiveLabel.IsManaged(p) || p.Spec.EgressGateway.EgressIP == "" {
 				continue
 			}
 			if ip, err := iprange.ParseIPv4(p.Spec.EgressGateway.EgressIP); err == nil && !allowed.Contains(ip) {

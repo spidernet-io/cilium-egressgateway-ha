@@ -39,16 +39,19 @@ Cilium 社区版的 Egress Gateway 可以把匹配的 Pod 流量转发到网关�
 
 | 名称 | 形式 | 作用 |
 |---|---|---|
-| controller | Deployment，2 副本，运行在 master 节点上，用 Lease 选出一个工作实例 | 决定哪个节点是主网关；探测主网关；执行切换；维护 `egress-gw-active` label；提供 admission webhook |
+| controller | Deployment，2 副本，运行在 master 节点上，用 Lease 选出一个工作实例 | 决定哪个节点是主网关；探测主网关；执行切换；维护 `egressgateway-ha.spidernet.io/active-node` label；提供 admission webhook |
 | agent | DaemonSet，运行在候选节点上，`hostNetwork: true` | 本节点是主网关时，把出口 IP 配到网卡上，并上报状态；不是主网关时，删除出口 IP |
 | `EgressGatewayHA` | 集群级 CR，全局只有一个，名字固定为 `default` | spec：候选节点、网卡、出口 IP、当前主网关 `activeNode`。status：切换进度和各节点状态 |
-| `egress-gw-active=true` | Node 和 CiliumNode 上的 label | 只打在主网关上。policy 的 nodeSelector 匹配这个 label，所以 Cilium 选中的网关一定是主网关 |
+| `egressgateway-ha.spidernet.io/candidate-node=true` | Node 上的 label，运维打上 | 标记出口节点（候选网关节点）。是 Helm value `global.egressNodeSelector` 的默认值，也可以改用其他 selector |
+| `egressgateway-ha.spidernet.io/active-node=true` | Node 和 CiliumNode 上的 label | 只打在主网关上。policy 的 nodeSelector 匹配这个 label，所以 Cilium 选中的网关一定是主网关 |
 
 controller 只负责做决定，agent 只负责执行。
 
+两个 label 不能合并：出口节点 label 打在多个节点上，主网关 label 同一时刻只打在一个节点上。如果 policy 直接匹配出口节点 label，Cilium 会按节点名选网关，主网关就不再由 controller 决定（见[设计细节](reference/design-details.md) 6.2 节）。主网关 label 的 key 和 value 可以在安装时通过 Helm value `global.activeNodeLabel` 修改，见[设计细节](reference/design-details.md) 5.6 节。下文以默认值为例。
+
 ### 2.2 数据面如何工作
 
-1. 用户的 policy 中，nodeSelector 写的是 `egress-gw-active: "true"`。所有 cilium-agent 都把带这个 label 的节点作为网关，业务 Pod 的出口流量经 VXLAN 送到这个节点。
+1. 用户的 policy 中，nodeSelector 写的是 `egressgateway-ha.spidernet.io/active-node: "true"`。所有 cilium-agent 都把带这个 label 的节点作为网关，业务 Pod 的出口流量经 VXLAN 送到这个节点。
 2. 主网关上的 agent 把出口 IP 以 /32 配到 `spec.interface` 上，并发送 GARP，让上游把出口 IP 指向这个节点。
 3. 主网关上的 cilium-agent 找到网卡上的出口 IP，在 BPF 中把出口流量 SNAT 成这个 IP。
 
@@ -69,7 +72,7 @@ controller 用两阶段切换同时满足这两个约束：先让新节点配好
 
 - **`spec.activeNode` 是主网关的唯一来源。** 默认为空，controller 选出主网关后写入；故障切换时由 controller 修改；运维修改这个字段就是手动切换。
 - `status.activeNode` 由主网关上的 agent 写入，展示这个节点上出口 IP 的实际状态：节点名、已经配置的出口 IP、是否全部配好、是否有冲突。
-- 切换是否完成，以 `egress-gw-active` label 实际所在的节点为准：label 还没有打在 `spec.activeNode` 上，说明正在切换，`Switching` condition 会写明从哪个节点切到哪个节点。
+- 切换是否完成，以 `egressgateway-ha.spidernet.io/active-node` label 实际所在的节点为准：label 还没有打在 `spec.activeNode` 上，说明正在切换，`Switching` condition 会写明从哪个节点切到哪个节点。
 - 其他 spec 字段的默认值来自 Helm values。controller 只在 CR 不存在时创建它，之后以 CR 为准。
 
 CRD 的完整字段和 conditions 见[设计细节](reference/design-details.md)第 1 章。
@@ -160,7 +163,7 @@ controller 的工作实例持续检查主网关，满足以下**任意一个**�
 
 controller 看到 `status.activeNode.name` 等于 `spec.activeNode`，并且 `ready` 为 true 后：
 
-1. 给新节点的 Node 和 CiliumNode 打上 `egress-gw-active=true`。所有 cilium-agent 把网关切到新节点，新节点上的出口 IP 已经存在，可以立即生效。
+1. 给新节点的 Node 和 CiliumNode 打上 `egressgateway-ha.spidernet.io/active-node=true`。所有 cilium-agent 把网关切到新节点，新节点上的出口 IP 已经存在，可以立即生效。
 2. 删除其他所有节点 Node 和 CiliumNode 上的这个 label。旧节点宕机时，它的 cilium-agent 不会把 Node label 的变化同步到 CiliumNode，所以要直接修改 CiliumNode。
 3. 设置 `Switching=False`，切换完成。
 
@@ -227,7 +230,7 @@ agent 的详细流程见[设计细节](reference/design-details.md)第 3 章。
 
 ### 6.1 Egress policy
 
-nodeSelector 中引用了 `egress-gw-active` 的 policy，就由本项目管理，不需要额外的 label 或 annotation：
+nodeSelector 中引用了 `egressgateway-ha.spidernet.io/active-node` 的 policy，就由本项目管理，不需要额外的 label 或 annotation：
 
 ```yaml
 apiVersion: cilium.io/v2
@@ -247,17 +250,17 @@ spec:
   egressGateway:
     nodeSelector:
       matchLabels:
-        egress-gw-active: "true"
+        egressgateway-ha.spidernet.io/active-node: "true"
     # egressIP 可以不写，由 webhook 填入 defaultEgressIP
 ```
 
 webhook 的规则：
 
-- nodeSelector **只能**是 `egress-gw-active: "true"`，不能有其他条件。否则当前主网关不满足其他条件时，流量会被丢弃。
+- nodeSelector **只能**是 `egressgateway-ha.spidernet.io/active-node: "true"`，不能有其他条件。否则当前主网关不满足其他条件时，流量会被丢弃。
 - egressIP 可以不写，由 webhook 补全为 `defaultEgressIP`。填写时，必须在 `spec.egressIPs` 中。
 - **不能填写 `interface`**。Cilium 不允许同时填写 `egressIP` 和 `interface`，否则会忽略整个 policy。出口 IP 配在哪块网卡，由 `EgressGatewayHA.spec.interface` 决定。
 - 多个 policy 可以使用同一个 egressIP。
-- 不匹配的 policy（nodeSelector 中没有 `egress-gw-active`）不会发送到 webhook，完全不受影响。
+- 不匹配的 policy（nodeSelector 中没有 `egressgateway-ha.spidernet.io/active-node`）不会发送到 webhook，完全不受影响。
 
 webhook 的完整规则见[设计细节](reference/design-details.md)第 4 章。
 
@@ -269,7 +272,10 @@ webhook 的完整规则见[设计细节](reference/design-details.md)第 4 章�
 global:
   egressNodeSelector:               # 出口节点：agent DaemonSet 的调度范围，以及创建 CR 时的 spec.egressNodeSelector
     matchLabels:
-      node-role.example.com/egress: "true"
+      egressgateway-ha.spidernet.io/candidate-node: "true"
+  activeNodeLabel:                  # 主网关 label，只在安装时设置，见 2.1
+    key: egressgateway-ha.spidernet.io/active-node
+    value: "true"
   imageRegistryOverride: ""         # 替换所有镜像的 registry，用于离线环境
 
 controller:

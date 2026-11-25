@@ -37,7 +37,7 @@ func Policy() *ciliumv2.CiliumEgressGatewayPolicy {
 			DestinationCIDRs: []ciliumv2.CIDR{ciliumv2.CIDR(E.TargetIP() + "/32")},
 			EgressGateway: &ciliumv2.EgressGateway{
 				NodeSelector: &slimv1.LabelSelector{MatchLabels: map[string]slimv1.MatchLabelsValue{
-					v1alpha1.ActiveLabelKey: v1alpha1.ActiveLabelValue,
+					v1alpha1.DefaultActiveLabelKey: v1alpha1.DefaultActiveLabelValue,
 				}},
 				EgressIP: E.EgressIP(),
 			},
@@ -101,12 +101,12 @@ func ActiveLabels(c client.Client) (nodes, ciliumNodes []string, err error) {
 		return nil, nil, err
 	}
 	for _, n := range nl.Items {
-		if n.Labels[v1alpha1.ActiveLabelKey] == v1alpha1.ActiveLabelValue {
+		if n.Labels[v1alpha1.DefaultActiveLabelKey] == v1alpha1.DefaultActiveLabelValue {
 			nodes = append(nodes, n.Name)
 		}
 	}
 	for _, n := range cnl.Items {
-		if n.Labels[v1alpha1.ActiveLabelKey] == v1alpha1.ActiveLabelValue {
+		if n.Labels[v1alpha1.DefaultActiveLabelKey] == v1alpha1.DefaultActiveLabelValue {
 			ciliumNodes = append(ciliumNodes, n.Name)
 		}
 	}

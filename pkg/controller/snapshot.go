@@ -12,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 
 	"github.com/spidernet-io/cilium-egressgateway-ha/api/v1alpha1"
+	"github.com/spidernet-io/cilium-egressgateway-ha/pkg/k8s"
 	"github.com/spidernet-io/cilium-egressgateway-ha/pkg/probe"
 )
 
@@ -39,15 +40,12 @@ func (n *nodeInfo) labelled() bool { return n.nodeLabel || n.ciliumNodeLabel }
 
 // snapshot is the cluster state used by one reconcile.
 type snapshot struct {
-	nodes map[string]*nodeInfo
+	active k8s.ActiveLabel
+	nodes  map[string]*nodeInfo
 	// ciliumAgentCheck requires a ready cilium-agent on a new active node.
 	ciliumAgentCheck bool
 	// probe returns the TCP probe result of a node; nil treats every node as reachable.
 	probe func(name string) (probe.Result, bool)
-}
-
-func isActive(l map[string]string) bool {
-	return l[v1alpha1.ActiveLabelKey] == v1alpha1.ActiveLabelValue
 }
 
 func podReady(p *corev1.Pod) bool {
@@ -62,8 +60,8 @@ func podReady(p *corev1.Pod) bool {
 	return false
 }
 
-func newSnapshot(sel labels.Selector, nodes []corev1.Node, cns []ciliumv2.CiliumNode, ciliumPods, agentPods []corev1.Pod) *snapshot {
-	s := &snapshot{nodes: map[string]*nodeInfo{}}
+func newSnapshot(sel labels.Selector, active k8s.ActiveLabel, nodes []corev1.Node, cns []ciliumv2.CiliumNode, ciliumPods, agentPods []corev1.Pod) *snapshot {
+	s := &snapshot{nodes: map[string]*nodeInfo{}, active: active}
 	get := func(name string) *nodeInfo {
 		n, ok := s.nodes[name]
 		if !ok {
@@ -77,7 +75,7 @@ func newSnapshot(sel labels.Selector, nodes []corev1.Node, cns []ciliumv2.Cilium
 		n := get(node.Name)
 		n.exists = true
 		n.candidate = sel.Matches(labels.Set(node.Labels))
-		n.nodeLabel = isActive(node.Labels)
+		n.nodeLabel = s.active.Matches(node.Labels)
 		for _, a := range node.Status.Addresses {
 			if ip, err := netip.ParseAddr(a.Address); err == nil && a.Type == corev1.NodeInternalIP && ip.Is4() {
 				n.ip = ip
@@ -95,7 +93,7 @@ func newSnapshot(sel labels.Selector, nodes []corev1.Node, cns []ciliumv2.Cilium
 	for i := range cns {
 		n := get(cns[i].Name)
 		n.hasCiliumNode = true
-		n.ciliumNodeLabel = isActive(cns[i].Labels)
+		n.ciliumNodeLabel = s.active.Matches(cns[i].Labels)
 	}
 	for i := range ciliumPods {
 		if p := &ciliumPods[i]; podReady(p) {
@@ -121,11 +119,11 @@ func (s *snapshot) setLabels(nodes []corev1.Node, cns []ciliumv2.CiliumNode) {
 			// Not in the cache yet: it will show up in a later reconcile.
 			continue
 		}
-		n.nodeLabel = isActive(nodes[i].Labels)
+		n.nodeLabel = s.active.Matches(nodes[i].Labels)
 	}
 	for i := range cns {
 		if n, ok := s.nodes[cns[i].Name]; ok {
-			n.ciliumNodeLabel = isActive(cns[i].Labels)
+			n.ciliumNodeLabel = s.active.Matches(cns[i].Labels)
 			n.hasCiliumNode = true
 		}
 	}

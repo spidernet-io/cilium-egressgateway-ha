@@ -32,7 +32,7 @@ if ! docker inspect "${TARGET}" >/dev/null 2>&1; then
     "${AGNHOST_IMAGE}" netexec --http-port=8080 >/dev/null
 fi
 
-kubectl label node "${CP}" "${W1}" "${W2}" egress-gw-candidate=true --overwrite
+kubectl label node "${CP}" "${W1}" "${W2}" egressgateway-ha.spidernet.io/candidate-node=true --overwrite
 sed -e "s|@AGNHOST_IMAGE@|${AGNHOST_IMAGE}|" -e "s|@NODE@|${W3}|" "${DIR}/yamls/client.yaml" | kubectl apply -f -
 kubectl wait --for=condition=Ready pod/client --timeout=5m
 

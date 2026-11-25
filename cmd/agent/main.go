@@ -29,12 +29,17 @@ func main() {
 	flag.DurationVar(&cfg.GARPInterval, "garp-interval", 0, "interval of periodic gratuitous ARP, 0 to only send it when an egress IP is added")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":9790", "address of the health probe endpoint")
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":9791", "address of the metrics endpoint, 0 to disable")
+	cfg.ActiveLabel.BindFlags(flag.CommandLine)
 	opts := zap.Options{}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 	log := ctrl.Log.WithName("agent")
 
+	if err := cfg.ActiveLabel.Validate(); err != nil {
+		log.Error(err, "invalid active node label")
+		os.Exit(1)
+	}
 	if cfg.NodeName == "" {
 		log.Error(nil, "--node-name or NODE_NAME is required")
 		os.Exit(1)
@@ -73,7 +78,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	log.Info("starting agent", "node", cfg.NodeName)
+	log.Info("starting agent", "node", cfg.NodeName, "activeNodeLabel", cfg.ActiveLabel.String())
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		log.Error(err, "manager exited")
 	}

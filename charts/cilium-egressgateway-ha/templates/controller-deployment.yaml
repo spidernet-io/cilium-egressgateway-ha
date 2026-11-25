@@ -57,6 +57,7 @@ spec:
         args:
         - --default-spec=/etc/egressgateway-ha/default-spec.yaml
         - --resync-interval={{ .Values.controller.resyncInterval }}
+        {{- include "egwha.activeNodeLabelArgs" . | nindent 8 }}
         {{- with .Values.controller.egressNodeProbe }}
         - --egress-node-probe={{ .enabled }}
         - --egress-node-probe-port={{ .port }}

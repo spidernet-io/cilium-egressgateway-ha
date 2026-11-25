@@ -1,12 +1,20 @@
 global:
-  # Nodes that may hold the egress IPs. Used for:
+  # Nodes that may hold the egress IPs (egress nodes). Used for:
   #   1. nodeAffinity of the agent DaemonSet, updated on every helm upgrade;
   #   2. spec.egressNodeSelector of EgressGatewayHA "default", only when the
   #      controller creates it. Later changes must also be made on the CR.
-  # Required, e.g.
-  #   matchLabels:
-  #     node-role.example.com/egress: "true"
-  egressNodeSelector: {}
+  # Label the egress nodes with it, or select them with existing labels.
+  egressNodeSelector:
+    matchLabels:
+      egressgateway-ha.spidernet.io/candidate-node: "true"
+  # Put by the controller on the Node and CiliumNode of the active node only.
+  # Managed CiliumEgressGatewayPolicies select it in their nodeSelector.
+  # Install-time only: changing it later leaves existing policies and nodes
+  # with the old label. It must not be excluded from CiliumNode by Cilium's
+  # exclude-node-label-patterns.
+  activeNodeLabel:
+    key: egressgateway-ha.spidernet.io/active-node
+    value: "true"
   # Replaces the registry of all images, e.g. for offline environments.
   imageRegistryOverride: ""
   imagePullSecrets: []
@@ -121,7 +129,7 @@ egressGatewayHA:
   defaultEgressIP: ""
 
 # Defaults and validates managed CiliumEgressGatewayPolicies (nodeSelector
-# referencing egress-gw-active). When disabled, a managed policy without
+# referencing global.activeNodeLabel.key). When disabled, a managed policy without
 # egressIP is not defaulted and Cilium uses the IP of the default route
 # interface instead. The validation of EgressGatewayHA is always on.
 ciliumEgressPolicyWebhook:

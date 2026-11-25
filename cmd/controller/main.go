@@ -65,6 +65,7 @@ func main() {
 	flag.StringVar(&certCfg.SecretName, "webhook-secret", "egressgateway-ha-webhook-cert", "Secret that stores the self-signed webhook certificate")
 	flag.StringVar(&certCfg.MutatingWebhookConfiguration, "mutating-webhook-configuration", "", "MutatingWebhookConfiguration whose caBundle is set")
 	flag.StringVar(&certCfg.ValidatingWebhookConfiguration, "validating-webhook-configuration", "", "ValidatingWebhookConfiguration whose caBundle is set")
+	cfg.ActiveLabel.BindFlags(flag.CommandLine)
 	opts := zap.Options{}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
@@ -81,6 +82,9 @@ func main() {
 	}
 	if cfg.AgentSelector, err = labels.Parse(agentSelector); err != nil {
 		fail(err, "invalid --agent-selector")
+	}
+	if err := cfg.ActiveLabel.Validate(); err != nil {
+		fail(err, "invalid active node label")
 	}
 	if err := probeCfg.Validate(); probeEnabled && err != nil {
 		fail(err, "invalid probe flags")
@@ -169,7 +173,7 @@ func main() {
 	}
 	readyCheck := healthz.Ping
 	if certCfg.ServiceName != "" {
-		h := &egwwebhook.Handlers{Client: mgr.GetClient(), Decoder: admission.NewDecoder(mgr.GetScheme())}
+		h := &egwwebhook.Handlers{ActiveLabel: cfg.ActiveLabel, Client: mgr.GetClient(), Decoder: admission.NewDecoder(mgr.GetScheme())}
 		srv := mgr.GetWebhookServer()
 		srv.Register(egwwebhook.MutatePolicyPath, &webhook.Admission{Handler: admission.HandlerFunc(h.MutatePolicy)})
 		srv.Register(egwwebhook.ValidatePolicyPath, &webhook.Admission{Handler: admission.HandlerFunc(h.ValidatePolicy)})
@@ -180,7 +184,7 @@ func main() {
 		fail(err, "unable to add ready check")
 	}
 
-	log.Info("starting controller")
+	log.Info("starting controller", "activeNodeLabel", cfg.ActiveLabel.String())
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		log.Error(err, "manager exited")
 		if prober != nil {

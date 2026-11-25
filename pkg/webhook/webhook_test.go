@@ -22,6 +22,9 @@ import (
 	"github.com/spidernet-io/cilium-egressgateway-ha/pkg/k8s"
 )
 
+// A non-default active label checks that the configured label is used everywhere.
+var activeLabel = k8s.ActiveLabel{Key: "example.com/active", Value: "yes"}
+
 func egwha(mutate func(*v1alpha1.EgressGatewayHASpec)) *v1alpha1.EgressGatewayHA {
 	obj := &v1alpha1.EgressGatewayHA{
 		ObjectMeta: metav1.ObjectMeta{Name: v1alpha1.SingletonName},
@@ -48,7 +51,7 @@ func node(name, ip string, candidate bool) *corev1.Node {
 
 func policy(name string, mutate func(*ciliumv2.EgressGateway)) *ciliumv2.CiliumEgressGatewayPolicy {
 	gw := &ciliumv2.EgressGateway{NodeSelector: &slimv1.LabelSelector{
-		MatchLabels: map[string]slimv1.MatchLabelsValue{v1alpha1.ActiveLabelKey: "true"}}}
+		MatchLabels: map[string]slimv1.MatchLabelsValue{activeLabel.Key: slimv1.MatchLabelsValue(activeLabel.Value)}}}
 	if mutate != nil {
 		mutate(gw)
 	}
@@ -66,7 +69,7 @@ func withIP(ip string) func(*ciliumv2.EgressGateway) {
 func newHandlers(objs ...client.Object) *Handlers {
 	s := k8s.NewScheme()
 	c := fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).Build()
-	return &Handlers{Client: c, Decoder: admission.NewDecoder(s)}
+	return &Handlers{ActiveLabel: activeLabel, Client: c, Decoder: admission.NewDecoder(s)}
 }
 
 func request(t *testing.T, op admissionv1.Operation, obj, old runtime.Object) admission.Request {
@@ -130,12 +133,12 @@ func TestValidatePolicy(t *testing.T) {
 		}, denied: "nodeSelector must only be matchLabels"},
 		"wrong value": {mutate: func(gw *ciliumv2.EgressGateway) {
 			gw.EgressIP = "10.0.0.100"
-			gw.NodeSelector.MatchLabels[v1alpha1.ActiveLabelKey] = "false"
+			gw.NodeSelector.MatchLabels[activeLabel.Key] = "false"
 		}, denied: "nodeSelector must only be matchLabels"},
 		"matchExpressions": {mutate: func(gw *ciliumv2.EgressGateway) {
 			gw.EgressIP = "10.0.0.100"
 			gw.NodeSelector = &slimv1.LabelSelector{MatchExpressions: []slimv1.LabelSelectorRequirement{
-				{Key: v1alpha1.ActiveLabelKey, Operator: slimv1.LabelSelectorOpExists}}}
+				{Key: activeLabel.Key, Operator: slimv1.LabelSelectorOpExists}}}
 		}, denied: "nodeSelector must only be matchLabels"},
 		"interface": {mutate: func(gw *ciliumv2.EgressGateway) {
 			gw.EgressIP = "10.0.0.100"

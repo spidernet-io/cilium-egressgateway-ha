@@ -11,7 +11,6 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/spidernet-io/cilium-egressgateway-ha/api/v1alpha1"
-	"github.com/spidernet-io/cilium-egressgateway-ha/pkg/k8s"
 	"github.com/spidernet-io/cilium-egressgateway-ha/pkg/metrics"
 )
 
@@ -104,7 +103,7 @@ func (st *state) notifyPolicies(ctx context.Context) {
 		return
 	}
 	for i := range policies.Items {
-		if p := &policies.Items[i]; k8s.IsManagedPolicy(p) {
+		if p := &policies.Items[i]; st.r.Config.ActiveLabel.IsManaged(p) {
 			st.r.Recorder.Eventf(p, st.egw, corev1.EventTypeWarning, "EgressGatewayNotReady", "Check",
 				"EgressGatewayHA default is not ready (%s): %s", cur.Reason, cur.Message)
 		}

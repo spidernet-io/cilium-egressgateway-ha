@@ -64,6 +64,7 @@ type StatusWriter interface {
 
 type Config struct {
 	NodeName          string
+	ActiveLabel       k8s.ActiveLabel
 	ReconcileInterval time.Duration
 	// GARPInterval re-announces configured egress IPs periodically; 0 disables it.
 	GARPInterval time.Duration
@@ -164,18 +165,18 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (ctrl.R
 		log.Error(err, "invalid spec.egressIPs, keeping egress IPs unchanged")
 		return r.requeue(), nil
 	}
-	err = r.configure(ctx, egw, desiredIPs(ctx, policies.Items, allowed))
+	err = r.configure(ctx, egw, desiredIPs(ctx, r.Config.ActiveLabel, policies.Items, allowed))
 	r.updateIPMetric()
 	return r.result(err)
 }
 
 // desiredIPs returns the sorted, deduplicated egress IPs of managed policies
 // that are allowed by spec.egressIPs.
-func desiredIPs(ctx context.Context, policies []ciliumv2.CiliumEgressGatewayPolicy, allowed iprange.List) []netip.Addr {
+func desiredIPs(ctx context.Context, active k8s.ActiveLabel, policies []ciliumv2.CiliumEgressGatewayPolicy, allowed iprange.List) []netip.Addr {
 	var out []netip.Addr
 	for i := range policies {
 		p := &policies[i]
-		if !k8s.IsManagedPolicy(p) || p.Spec.EgressGateway.EgressIP == "" {
+		if !active.IsManaged(p) || p.Spec.EgressGateway.EgressIP == "" {
 			continue
 		}
 		ip, err := iprange.ParseIPv4(p.Spec.EgressGateway.EgressIP)

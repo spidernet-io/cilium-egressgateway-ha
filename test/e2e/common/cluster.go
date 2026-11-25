@@ -15,12 +15,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 
+	"github.com/spidernet-io/cilium-egressgateway-ha/api/v1alpha1"
 	"github.com/spidernet-io/cilium-egressgateway-ha/pkg/k8s"
 )
 
 const (
-	// CandidateLabel marks the egress nodes, see test/yamls/values.yaml.
-	CandidateLabel = "egress-gw-candidate"
+	// CandidateLabel marks the egress nodes; it is the default egressNodeSelector of the chart.
+	CandidateLabel = v1alpha1.DefaultCandidateLabelKey
 	SteadyTimeout  = 2 * time.Minute
 )
 
