@@ -20,6 +20,7 @@ import (
 	"time"
 
 	ciliumv2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
+	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -94,6 +95,8 @@ type Reconciler struct {
 	trigger chan event.GenericEvent
 	// notReady remembers components on the active node already reported not ready.
 	notReady map[string]bool
+	// seen is the node state logged by the last reconcile, to log only changes.
+	seen map[string]nodeLogState
 }
 
 // Notify triggers a reconcile, e.g. when a probe result changes.
@@ -139,7 +142,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (ctrl.R
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	st := &state{r: r, egw: egw, snap: snap, conds: newCondSet(egw.Status.Conditions, r.now())}
+	st := &state{r: r, egw: egw, snap: snap, conds: newCondSet(egw.Status.Conditions, r.now()), log: log}
+	st.logNodeChanges()
 	if v, ok := egw.Annotations[SwitchAnnotation]; ok {
 		sw := &switchRecord{}
 		if err := json.Unmarshal([]byte(v), sw); err == nil {
@@ -149,6 +153,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (ctrl.R
 		}
 	}
 	runErr := st.run(ctx)
+	st.logSummary()
 	st.finishConditions()
 	st.reportComponents()
 	st.updateMetrics()
@@ -227,6 +232,7 @@ type state struct {
 	snap  *snapshot
 	sw    *switchRecord
 	conds *condSet
+	log   logr.Logger
 }
 
 func orNone(s string) string {
@@ -236,7 +242,10 @@ func orNone(s string) string {
 	return s
 }
 
+// event records an Event on EgressGatewayHA and logs it at INFO, so the
+// history is kept after the Event expires.
 func (st *state) event(eventType, reason, note string) {
+	st.log.Info(note, "event", reason, "type", eventType)
 	if st.r.Recorder != nil {
 		st.r.Recorder.Eventf(st.egw, nil, eventType, reason, "Switch", "%s", note)
 	}
@@ -303,6 +312,7 @@ func (st *state) run(ctx context.Context) error {
 		msg = fmt.Sprintf("switching %s -> %s: %s", orNone(st.sw.From), active, gw.Message)
 	}
 	st.conds.set(v1alpha1.ConditionSwitching, metav1.ConditionTrue, reason, msg)
+	st.log.V(1).Info("waiting for the new active node", "node", active, "reason", reason, "message", msg)
 	if from == "" {
 		st.conds.set(v1alpha1.ConditionActiveNodeElected, metav1.ConditionFalse, st.sw.Reason,
 			fmt.Sprintf("waiting for %s to become the active node", active))
@@ -381,7 +391,6 @@ func (st *state) start(ctx context.Context, from, to, reason, msg string) error 
 		eventType = corev1.EventTypeNormal
 	}
 	st.event(eventType, "SwitchStarted", fmt.Sprintf("switching %s -> %s (%s): %s", orNone(from), to, reason, msg))
-	logf.FromContext(ctx).Info("switch started", "from", from, "to", to, "reason", reason, "message", msg)
 	return nil
 }
 
@@ -393,7 +402,6 @@ func (st *state) rejectTarget(ctx context.Context, from, target, why string) err
 	msg := fmt.Sprintf("%s is not available (%s), spec.activeNode restored to %s", target, why, orNone(from))
 	st.conds.set(v1alpha1.ConditionSwitching, metav1.ConditionFalse, v1alpha1.ReasonTargetUnavailable, msg)
 	st.event(corev1.EventTypeWarning, v1alpha1.ReasonTargetUnavailable, msg)
-	logf.FromContext(ctx).Info("manual switch rejected", "target", target, "reason", why)
 	return nil
 }
 

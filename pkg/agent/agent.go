@@ -158,6 +158,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (ctrl.R
 	r.synced.Store(true)
 
 	if egw.Spec.ActiveNode != r.Config.NodeName {
+		log.V(1).Info("not the active node, releasing egress IPs", "activeNode", egw.Spec.ActiveNode)
 		err := r.releaseAll(ctx)
 		r.updateIPMetric()
 		return r.result(err)
@@ -168,7 +169,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (ctrl.R
 		log.Error(err, "invalid spec.egressIPs, keeping egress IPs unchanged")
 		return r.requeue(), nil
 	}
-	err = r.configure(ctx, egw, desiredIPs(ctx, r.Config.ActiveLabel, policies.Items, allowed), allowed)
+	desired := desiredIPs(ctx, r.Config.ActiveLabel, policies.Items, allowed)
+	log.V(1).Info("reconciling as the active node", "desiredEgressIPs", desired)
+	err = r.configure(ctx, egw, desired, allowed)
 	r.updateIPMetric()
 	return r.result(err)
 }
@@ -318,6 +321,8 @@ func (r *Reconciler) configure(ctx context.Context, egw *v1alpha1.EgressGatewayH
 		log.Info("added egress IP", "interface", iface, "ip", ip)
 		if err := r.Ops.Announce(iface, ip); err != nil {
 			log.Error(err, "failed to send gratuitous ARP", "ip", ip)
+		} else {
+			log.V(1).Info("sent gratuitous ARP", "interface", iface, "ip", ip)
 		}
 		configured = append(configured, ip)
 		added = true
@@ -334,6 +339,8 @@ func (r *Reconciler) configure(ctx context.Context, egw *v1alpha1.EgressGatewayH
 		for _, ip := range configured {
 			if err := r.Ops.Announce(iface, ip); err != nil {
 				log.Error(err, "failed to send gratuitous ARP", "ip", ip)
+			} else {
+				log.V(1).Info("sent periodic gratuitous ARP", "interface", iface, "ip", ip)
 			}
 		}
 	}
@@ -381,6 +388,10 @@ func (r *Reconciler) writeStatus(ctx context.Context, egw *v1alpha1.EgressGatewa
 	if old != nil && old.Status == cond.Status && old.Reason == cond.Reason && old.Message == cond.Message &&
 		old.ObservedGeneration == cond.ObservedGeneration && activeEqual(egw.Status.ActiveNode, active) {
 		return nil
+	}
+	if old == nil || old.Status != cond.Status || old.Reason != cond.Reason || old.Message != cond.Message {
+		logf.FromContext(ctx).Info("GatewayReady changed", "status", cond.Status, "reason", cond.Reason,
+			"message", cond.Message, "egressIPs", active.EgressIPs)
 	}
 	return r.Status.Apply(ctx, active, cond)
 }

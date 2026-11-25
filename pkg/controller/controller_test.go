@@ -11,12 +11,15 @@ import (
 
 	ciliumv2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	slimv1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/meta/v1"
+	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/tools/events"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -116,6 +119,8 @@ type env struct {
 	r        *Reconciler
 	status   *fakeStatus
 	recorder *events.FakeRecorder
+	// logs collects log lines when set.
+	logs *[]string
 }
 
 func newEnv(t *testing.T, egw *v1alpha1.EgressGatewayHA, nodes ...testNode) *env {
@@ -139,7 +144,13 @@ func newEnv(t *testing.T, egw *v1alpha1.EgressGatewayHA, nodes ...testNode) *env
 
 func (e *env) reconcile() {
 	e.t.Helper()
-	res, err := e.r.Reconcile(context.Background(), reconcile.Request{})
+	ctx := context.Background()
+	if e.logs != nil {
+		ctx = logr.NewContext(ctx, funcr.New(func(prefix, args string) {
+			*e.logs = append(*e.logs, args)
+		}, funcr.Options{Verbosity: 1, LogInfoLevel: ptr.To("v")}))
+	}
+	res, err := e.r.Reconcile(ctx, reconcile.Request{})
 	if err != nil {
 		e.t.Fatalf("reconcile: %v", err)
 	}
@@ -695,6 +706,67 @@ func TestProbeTargetsAndEgressNodesStatus(t *testing.T) {
 		t.Error("status written although no egress node changed")
 	}
 	expectNodes(v1alpha1.EgressNodeStatus{Name: "n1", Reachable: true, LastTransitionTime: at(0)}, failed)
+}
+
+func TestNodeChangeLogs(t *testing.T) {
+	e, p := probeEnv(t, "n1", healthy("n1"), healthy("n2"), healthy("n3"))
+	e.logs = &[]string{}
+	// logged returns the verbosity of the log line containing all of subs, or -1.
+	logged := func(subs ...string) int {
+		for _, l := range *e.logs {
+			if all(l, subs) {
+				if strings.Contains(l, `"v"=1`) {
+					return 1
+				}
+				return 0
+			}
+		}
+		return -1
+	}
+	step := func(name string, failures int) {
+		*e.logs = nil
+		if failures == 0 {
+			delete(p.results, name)
+		} else {
+			p.fail(name, failures)
+		}
+		e.reconcile()
+	}
+
+	step("n2", 1)
+	if v := logged(`"node"="n2"`, "TCP probe failed", `"failures"=1`); v != 0 {
+		t.Errorf("first failure: verbosity %d, want INFO; logs %v", v, *e.logs)
+	}
+	step("n2", 2)
+	if v := logged(`"node"="n2"`, "TCP probe failed", `"failures"=2`); v != 1 {
+		t.Errorf("second failure: verbosity %d, want DEBUG; logs %v", v, *e.logs)
+	}
+	step("n2", 3)
+	if v := logged(`"node"="n2"`, "failure threshold reached"); v != 0 {
+		t.Errorf("threshold: verbosity %d, want INFO; logs %v", v, *e.logs)
+	}
+	step("n2", 0)
+	if v := logged(`"node"="n2"`, "TCP probe recovered", `"previousFailures"=3`); v != 0 {
+		t.Errorf("recovered: verbosity %d, want INFO; logs %v", v, *e.logs)
+	}
+	if v := logged("reconciled"); v != 1 {
+		t.Errorf("summary: verbosity %d, want DEBUG; logs %v", v, *e.logs)
+	}
+
+	// A failover logs the Events at INFO.
+	step("n1", 3)
+	if v := logged("switching n1 -> n2 (Failover)", `"event"="SwitchStarted"`); v != 0 {
+		t.Errorf("switch started: verbosity %d, want INFO; logs %v", v, *e.logs)
+	}
+}
+
+func all(s string, subs []string) bool {
+	for _, sub := range subs {
+		if !strings.Contains(s, sub) {
+			return false
+		}
+	}
+	return true
 }
 
 func TestProbeFailover(t *testing.T) {
