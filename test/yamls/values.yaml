@@ -1,0 +1,8 @@
+# Helm values for the e2e tests. The default global.egressNodeSelector and
+# global.activeNodeLabel are used; egressGatewayHA.egressIPs is set by install.sh.
+agent:
+  reconcileInterval: 5s
+  logLevel: debug
+
+controller:
+  logLevel: debug

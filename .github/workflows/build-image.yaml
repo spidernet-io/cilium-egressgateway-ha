@@ -1,0 +1,142 @@
+name: Build Image
+
+# Builds the controller and agent images.
+# - push: pushes multi-arch images with every tag in `tags` to ghcr.io.
+# - upload-artifact: saves the linux/amd64 images tagged with the first tag in
+#   `tags` to the `images` artifact, for jobs that load them with `docker load`.
+# A commit merged into main pushes the images with the commit sha and latest tags.
+
+on:
+  push:
+    branches: [main]
+    paths:
+    - "**.go"
+    - go.mod
+    - go.sum
+    - Dockerfile
+    - Makefile
+    - .github/workflows/build-image.yaml
+  workflow_call:
+    inputs:
+      ref:
+        description: Git ref to build. Defaults to the ref of the calling event.
+        type: string
+        default: ""
+      tags:
+        description: Space-separated image tags. The first one tags the artifact images.
+        type: string
+        required: true
+      push:
+        description: Push the images to ghcr.io.
+        type: boolean
+        default: false
+      platforms:
+        description: Comma-separated platforms of the pushed images.
+        type: string
+        default: linux/amd64,linux/arm64
+      upload-artifact:
+        description: Upload the linux/amd64 images as the `images` artifact.
+        type: boolean
+        default: false
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Git ref to build. Defaults to the selected branch.
+        type: string
+        default: ""
+      tags:
+        description: Space-separated image tags.
+        type: string
+        required: true
+      push:
+        description: Push the images to ghcr.io.
+        type: boolean
+        default: true
+      platforms:
+        description: Comma-separated platforms of the pushed images.
+        type: string
+        default: linux/amd64,linux/arm64
+      upload-artifact:
+        description: Upload the linux/amd64 images as the `images` artifact.
+        type: boolean
+        default: false
+
+jobs:
+  build:
+    name: Build images
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    # Builds the main images one at a time, so an older commit never overwrites latest.
+    concurrency:
+      group: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'build-image-main' || github.run_id }}
+    env:
+      REGISTRY: ghcr.io
+      # Pushes to main have no inputs.
+      TAGS: ${{ inputs.tags || format('{0} latest', github.sha) }}
+      PLATFORMS: ${{ inputs.platforms || 'linux/amd64,linux/arm64' }}
+      PUSH: ${{ !inputs.tags || inputs.push }}
+      UPLOAD_ARTIFACT: ${{ inputs.upload-artifact || false }}
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ inputs.ref }}
+    - uses: actions/setup-go@v5
+      with:
+        go-version-file: go.mod
+    - name: Prepare
+      run: |
+        echo "REPOSITORY=${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+        echo "REVISION=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+        archs=""
+        if [ "$PUSH" = true ]; then
+          archs="$(echo "$PLATFORMS" | tr ',' '\n' | sed 's|^linux/||')"
+        fi
+        if [ "$UPLOAD_ARTIFACT" = true ]; then
+          archs="$archs amd64"
+        fi
+        echo "ARCHS=$(echo "$archs" | xargs -n1 | sort -u | xargs)" >> "$GITHUB_ENV"
+    - name: Build binaries
+      run: |
+        for arch in $ARCHS; do
+          make bin ARCH="$arch"
+        done
+    - uses: docker/setup-buildx-action@v3
+    - uses: docker/login-action@v3
+      if: env.PUSH == 'true'
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    - name: Build and push images
+      if: env.PUSH == 'true'
+      run: |
+        for c in controller agent; do
+          args=()
+          for t in $TAGS; do
+            args+=(-t "$REGISTRY/$REPOSITORY/$c:$t")
+          done
+          docker buildx build --platform "$PLATFORMS" --build-arg COMPONENT="$c" \
+            --label org.opencontainers.image.source="https://github.com/$GITHUB_REPOSITORY" \
+            --label org.opencontainers.image.revision="$REVISION" \
+            "${args[@]}" --push .
+        done
+    - name: Export images
+      if: env.UPLOAD_ARTIFACT == 'true'
+      run: |
+        tag="${TAGS%% *}"
+        images=()
+        for c in controller agent; do
+          docker buildx build --platform linux/amd64 --build-arg COMPONENT="$c" \
+            -t "$REGISTRY/$REPOSITORY/$c:$tag" --load .
+          images+=("$REGISTRY/$REPOSITORY/$c:$tag")
+        done
+        docker save -o images.tar "${images[@]}"
+    - uses: actions/upload-artifact@v4
+      if: env.UPLOAD_ARTIFACT == 'true'
+      with:
+        name: images
+        path: images.tar
+        retention-days: 1
+        overwrite: true

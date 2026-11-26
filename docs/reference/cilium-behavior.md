@@ -19,7 +19,7 @@
 - 节点恢复后，agent 会按 k8s Node 的 labels 覆盖 CiliumNode 的 labels。
 - 如果配置了 `exclude-node-label-patterns`，匹配的 label 不会同步到 CiliumNode。
 
-所以本项目切换主网关时，会同时修改 Node 和 CiliumNode 上的 `egress-gw-active` label。
+所以本项目切换主网关时，会同时修改 Node 和 CiliumNode 上的 `egressgateway-ha.spidernet.io/active-node` label。
 
 ## 3. egressIP 的查找时机
 

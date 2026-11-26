@@ -1,0 +1,96 @@
+{{- $name := printf "%s-webhook" (include "egwha.fullname" .) }}
+{{- $controllerSA := printf "system:serviceaccount:%s:%s-controller" .Release.Namespace (include "egwha.fullname" .) }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "egwha.labels" . | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: controller
+  ports:
+  - name: webhook
+    port: 443
+    targetPort: webhook
+{{- if .Values.ciliumEgressPolicyWebhook.enabled }}
+---
+# caBundle is set by the controller at startup.
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "egwha.labels" . | nindent 4 }}
+webhooks:
+- name: mutate-ciliumegressgatewaypolicy.egressgateway-ha.spidernet.io
+  admissionReviewVersions: ["v1"]
+  sideEffects: None
+  # With Ignore, a policy without egressIP would silently use the IP of the
+  # default route interface. Only managed policies are sent here.
+  failurePolicy: Fail
+  timeoutSeconds: {{ .Values.ciliumEgressPolicyWebhook.timeoutSeconds }}
+  clientConfig:
+    service:
+      name: {{ $name }}
+      namespace: {{ .Release.Namespace }}
+      path: /mutate-ciliumegressgatewaypolicy
+  rules:
+  - apiGroups: ["cilium.io"]
+    apiVersions: ["v2"]
+    resources: ["ciliumegressgatewaypolicies"]
+    operations: ["CREATE", "UPDATE"]
+  matchConditions:
+  - name: managed-by-egressgateway-ha
+    expression: {{ include "egwha.managedPolicyExpression" . | quote }}
+{{- end }}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "egwha.labels" . | nindent 4 }}
+webhooks:
+{{- if .Values.ciliumEgressPolicyWebhook.enabled }}
+- name: validate-ciliumegressgatewaypolicy.egressgateway-ha.spidernet.io
+  admissionReviewVersions: ["v1"]
+  sideEffects: None
+  failurePolicy: Fail
+  timeoutSeconds: {{ .Values.ciliumEgressPolicyWebhook.timeoutSeconds }}
+  clientConfig:
+    service:
+      name: {{ $name }}
+      namespace: {{ .Release.Namespace }}
+      path: /validate-ciliumegressgatewaypolicy
+  rules:
+  - apiGroups: ["cilium.io"]
+    apiVersions: ["v2"]
+    resources: ["ciliumegressgatewaypolicies"]
+    operations: ["CREATE", "UPDATE"]
+  matchConditions:
+  - name: managed-by-egressgateway-ha
+    expression: {{ include "egwha.managedPolicyExpression" . | quote }}
+{{- end }}
+- name: validate-egressgatewayha.egressgateway-ha.spidernet.io
+  admissionReviewVersions: ["v1"]
+  sideEffects: None
+  failurePolicy: Fail
+  timeoutSeconds: 10
+  clientConfig:
+    service:
+      name: {{ $name }}
+      namespace: {{ .Release.Namespace }}
+      path: /validate-egressgatewayha
+  rules:
+  - apiGroups: ["egressgateway-ha.spidernet.io"]
+    apiVersions: ["v1alpha1"]
+    resources: ["egressgatewayhas"]
+    operations: ["CREATE", "UPDATE"]
+  matchConditions:
+  # The controller writes spec.activeNode during failover: it must not depend
+  # on the webhook being reachable, and its own decisions are not re-checked.
+  - name: not-from-controller
+    expression: {{ printf "request.userInfo.username != '%s'" $controllerSA | quote }}
