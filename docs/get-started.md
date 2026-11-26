@@ -98,7 +98,7 @@ cilium-egressgateway-ha is installed in kube-system.
 |---|---|---|
 | `controller.egressNodeProbe.enabled` | `true` | 对出口节点做 TCP 探测。关闭后，节点网络故障不会触发切换 |
 | `controller.ciliumAgentCheck.enabled` | `true` | 选择新主网关时，要求节点上的 cilium-agent Ready |
-| `ciliumEgressPolicyWebhook.enabled` | `true` | 补全和校验 policy。关闭后，未填写 egressIP 的 policy 不会被补全 |
+| `ciliumEgressPolicyWebhook.enabled` | `true` | 补全和校验被纳管的 policy。关闭后，未填写 egressIP 的 policy 不会被补全，填写的 egressIP 也不会被校验 |
 | `global.egressNodeSelector` | `egressgateway-ha.spidernet.io/egress-node: "true"` | 选择出口节点。可以改用节点上已有的 label |
 | `global.activeNodeLabel.key`、`.value` | `egressgateway-ha.spidernet.io/active-node`、`"true"` | 主网关 label，只能在安装时设置 |
 | `egressGatewayHA.interface` | `""` | 出口网卡。为空时，agent 选择子网包含出口 IP 的网卡，找不到时用默认路由的网卡 |
@@ -138,6 +138,11 @@ default   egw-e2e-worker   True        True    26s
 
 policy 的 `nodeSelector` 写成 `egressgateway-ha.spidernet.io/active-node: "true"`，就会由本项目管理。下面的 policy 把 `app-a` 命名空间中 Pod 访问集群外服务的流量，经主网关 SNAT 成出口 IP：
 
+被纳管的 policy 在创建和修改时都会经过本项目的 webhook，webhook 做两件事：
+
+- **补全**：没有填写 egressIP 时，填入 `defaultEgressIP`；未设置 `defaultEgressIP` 时，使用 `egressIPs` 中的第一个。
+- **校验**：不论 egressIP 是用户填写的还是补全的，都按下面的规则检查，不符合就拒绝创建。
+
 ```yaml
 apiVersion: cilium.io/v2
 kind: CiliumEgressGatewayPolicy
@@ -166,11 +171,37 @@ $ kubectl get ciliumegressgatewaypolicy egress-app-a -o jsonpath='{.spec.egressG
 172.21.255.195
 ```
 
-注意：
+webhook 的校验规则：
 
 - `nodeSelector` 只能包含 `egressgateway-ha.spidernet.io/active-node: "true"`（主网关 label），不能有其他条件。
 - 不能填写 `interface`。出口 IP 配在哪块网卡上，由 `EgressGatewayHA` 的 `spec.interface` 决定，默认自动选择。
-- 填写 egressIP 时，它必须在 `egressIPs` 中。
+- 不能使用 `egressGateways`（复数形式），只能用 `egressGateway`。
+- egressIP 必须在 `egressIPs` 范围内，并且不能是任何节点的 InternalIP。
+- 修改已有 policy 的 egressIP 是允许的，但会返回警告：已有的连接会断开。
+
+也可以自己填写 egressIP，例如另一个 policy `egress-app-b` 使用 `172.21.255.196`：
+
+```yaml
+  egressGateway:
+    nodeSelector:
+      matchLabels:
+        egressgateway-ha.spidernet.io/active-node: "true"
+    egressIP: 172.21.255.196
+```
+
+```console
+$ kubectl apply -f egress-app-b.yaml
+ciliumegressgatewaypolicy.cilium.io/egress-app-b created
+```
+
+egressIP 不在 `egressIPs` 范围内时，会被拒绝：
+
+```console
+$ kubectl apply -f egress-app-b.yaml      # egressIP: 172.21.255.100
+Error from server (Forbidden): error when creating "egress-app-b.yaml": admission webhook "validate-ciliumegressgatewaypolicy.egressgateway-ha.spidernet.io" denied the request: egressGateway.egressIP 172.21.255.100 is not in EgressGatewayHA spec.egressIPs [172.21.255.195-172.21.255.205]
+```
+
+多个 policy 使用不同的 egressIP 时，这些出口 IP 都配在同一个主网关上，切换时一起迁移。
 
 ## 6. 验证出口 IP
 
@@ -340,7 +371,7 @@ $ kubectl -n app-a exec backend -- curl -s http://172.21.255.250:8080/clientip
 如果要彻底清理：
 
 ```console
-# 1. 删除被管理的 policy，以及 EgressGatewayHA
+# 1. 删除被管理的 policy（创建过 egress-app-b 的话也一起删除），以及 EgressGatewayHA
 $ kubectl delete ciliumegressgatewaypolicy egress-app-a
 ciliumegressgatewaypolicy.cilium.io "egress-app-a" deleted
 $ kubectl delete egressgatewayha default

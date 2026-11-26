@@ -311,7 +311,7 @@ admission webhook 有超时限制（默认 10s），只能做静态校验，不�
 
 ### 5.4 metrics 和 Event
 
-controller 的 metrics 在 `controller.metricsPort`（默认 8080），只有工作实例会更新；agent 的 metrics 在 host 网络的 `agent.metricsPort`（默认 9791）。chart 为两者各创建一个 headless Service，`serviceMonitor.enabled=true` 时创建 ServiceMonitor。
+controller 的 metrics 在 `controller.metricsPort`（默认 8080），只有工作实例会更新；agent 的 metrics 在 host 网络的 `agent.metricsPort`（默认 9791）。chart 为两者各创建一个 headless Service，`serviceMonitor.enabled=true` 时创建 ServiceMonitor。各 metric 的用法和告警规则示例见 [Metrics](../metrics.md)。
 
 | metric | 类型 | 含义 |
 |---|---|---|
