@@ -1,6 +1,6 @@
 # 在本地运行 e2e 测试
 
-e2e 测试验证的是**当前代码**：它在本地用 kind 创建一个集群，安装 Cilium，再从当前代码构建 controller 和 agent 镜像，用仓库中的 chart（`charts/cilium-egressgateway-ha`）安装后运行测试。测试不使用已发布的镜像和 chart。每个 PR 在 GitHub Actions 中执行的也是同样的流程（见 [ci.yaml](../.github/workflows/ci.yaml)）。
+e2e 测试验证的是**当前代码**：它在本地用 kind 创建一个集群，安装 Cilium，再从当前代码构建 controller 和 agent 镜像，用仓库中的 chart（`charts/cilium-egressgateway-ha`）安装后运行测试。测试不使用已发布的镜像和 chart。每个 PR 在 GitHub Actions 中执行的也是同样的流程（见 [ci.yaml](../.github/workflows/ci.yaml)），区别是镜像由 [build-image.yaml](../.github/workflows/build-image.yaml) 构建，e2e job 用 `docker load` 加载后执行 `make e2e-install` 安装，不再重新构建。
 
 ## 1. 准备环境
 

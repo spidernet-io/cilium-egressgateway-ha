@@ -1,0 +1,153 @@
+name: Release
+
+# Runs on a vX.Y.Z tag. A vX.Y.Z-<suffix> tag, e.g. v0.2.0-rc.1, is released as a
+# prerelease and does not create a release branch.
+
+on:
+  push:
+    tags:
+    - "v[0-9]+.[0-9]+.[0-9]+"
+    - "v[0-9]+.[0-9]+.[0-9]+-*"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: Prepare
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.parse.outputs.version }}
+      branch: ${{ steps.parse.outputs.branch }}
+      prerelease: ${{ steps.parse.outputs.prerelease }}
+    steps:
+    - id: parse
+      env:
+        TAG: ${{ github.ref_name }}
+      run: |
+        if [[ ! "$TAG" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)(-[0-9A-Za-z.-]+)?$ ]]; then
+          echo "::error::invalid release tag $TAG"
+          exit 1
+        fi
+        echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+        echo "branch=release-${BASH_REMATCH[1]}.${BASH_REMATCH[2]}" >> "$GITHUB_OUTPUT"
+        if [ -n "${BASH_REMATCH[4]}" ]; then
+          echo "prerelease=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "prerelease=false" >> "$GITHUB_OUTPUT"
+        fi
+
+  branch:
+    name: Create the release branch
+    needs: prepare
+    if: needs.prepare.outputs.prerelease == 'false'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      BRANCH: ${{ needs.prepare.outputs.branch }}
+    steps:
+    - uses: actions/checkout@v4
+    - name: Create the branch if it does not exist
+      run: |
+        if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null; then
+          echo "$BRANCH already exists"
+          exit 0
+        fi
+        git push origin "HEAD:refs/heads/$BRANCH"
+
+  image:
+    name: Image
+    needs: prepare
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/build-image.yaml
+    with:
+      tags: ${{ github.ref_name }}
+      push: true
+
+  chart:
+    name: Chart
+    needs: [prepare, image]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      CHART: charts/cilium-egressgateway-ha
+      VERSION: ${{ needs.prepare.outputs.version }}
+      TAG: ${{ github.ref_name }}
+    steps:
+    - uses: actions/checkout@v4
+    - uses: azure/setup-helm@v4
+    # The image tag defaults to the chart appVersion.
+    - name: Package the chart
+      run: |
+        sed -i -E "s/^version:.*/version: ${VERSION}/; s/^appVersion:.*/appVersion: \"${TAG}\"/" "$CHART/Chart.yaml"
+        cat "$CHART/Chart.yaml"
+        helm package "$CHART" -d dist
+    - name: Push the chart
+      env:
+        PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        echo "$PASSWORD" | helm registry login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+        helm push dist/*.tgz "oci://ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/charts"
+    - uses: actions/upload-artifact@v4
+      with:
+        name: chart
+        path: dist/*.tgz
+        overwrite: true
+
+  release:
+    name: GitHub release
+    needs: [prepare, branch, chart]
+    if: ${{ !cancelled() && needs.chart.result == 'success' && needs.branch.result != 'failure' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+      PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+    steps:
+    - uses: actions/download-artifact@v4
+      with:
+        name: chart
+        path: dist
+    - name: Create the release
+      run: |
+        owner="${GITHUB_REPOSITORY_OWNER,,}"
+        repository="${GITHUB_REPOSITORY,,}"
+        cat > notes.md <<EOF
+        ## Installation
+
+        \`\`\`shell
+        helm install egwha oci://ghcr.io/${owner}/charts/cilium-egressgateway-ha --version ${VERSION} -n kube-system
+        \`\`\`
+
+        Images:
+
+        - \`ghcr.io/${repository}/controller:${TAG}\`
+        - \`ghcr.io/${repository}/agent:${TAG}\`
+
+        EOF
+        args=(--verify-tag --title "$TAG" --generate-notes --notes-file notes.md)
+        if [ "$PRERELEASE" = true ]; then
+          args+=(--prerelease)
+        else
+          # Keep the highest version as the latest release when patching an older branch.
+          highest="$(gh api "repos/$GH_REPO/git/matching-refs/tags/v" --paginate --jq '.[].ref' \
+            | sed 's|^refs/tags/||' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n1)"
+          if [ "$highest" = "$TAG" ]; then
+            args+=(--latest)
+          else
+            args+=(--latest=false)
+          fi
+        fi
+        gh release create "$TAG" "${args[@]}" dist/*.tgz

@@ -66,7 +66,11 @@ e2e-cluster:
 
 # Builds the images of the current tree and installs the chart.
 .PHONY: e2e-deploy
-e2e-deploy: image
+e2e-deploy: image e2e-install
+
+# Installs the chart with images that already exist locally, e.g. loaded from a CI artifact.
+.PHONY: e2e-install
+e2e-install:
 	REGISTRY=$(REGISTRY) REPOSITORY=$(REPOSITORY) TAG=$(TAG) test/scripts/install.sh
 
 # Runs every suite under test/e2e in order. The suites are disruptive.

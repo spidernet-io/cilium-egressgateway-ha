@@ -11,20 +11,10 @@ on:
     - Makefile
     - test/**
     - .github/workflows/ci.yaml
-  push:
-    branches: [main]
-    paths:
-    - "**.go"
-    - go.mod
-    - go.sum
-    - charts/**
-    - Dockerfile
-    - Makefile
-    - test/**
-    - .github/workflows/ci.yaml
+    - .github/workflows/build-image.yaml
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 permissions:
@@ -54,8 +44,21 @@ jobs:
     - name: Unit tests as root
       run: sudo -E env "PATH=$PATH" go test ./pkg/netops/
 
+  # Builds the images for e2e without pushing them. packages: write is only
+  # required because the reusable workflow declares it for pushing.
+  build:
+    name: Build
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/build-image.yaml
+    with:
+      tags: ${{ github.sha }}
+      upload-artifact: true
+
   e2e:
     name: E2E
+    needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
@@ -75,8 +78,13 @@ jobs:
         sudo sysctl -w fs.inotify.max_user_watches=524288
     - name: Create the kind cluster with the latest Cilium
       run: make e2e-cluster
-    - name: Build images and install
-      run: make e2e-deploy
+    - uses: actions/download-artifact@v4
+      with:
+        name: images
+    - name: Load images and install
+      run: |
+        docker load -i images.tar
+        make e2e-install REPOSITORY="${GITHUB_REPOSITORY,,}"
     - name: Run e2e tests
       run: make e2e-test
     - name: Collect logs
